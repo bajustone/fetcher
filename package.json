@@ -2,19 +2,31 @@
   "name": "@bajustone/fetcher",
   "version": "0.0.1",
   "description": "Schema-validated, typed fetch client with OpenAPI support",
-  "module": "src/index.ts",
   "type": "module",
+  "module": "src/index.ts",
+  "license": "MIT",
+  "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:watch": "bun test --watch",
-    "lint": "bunx --bun eslint .",
-    "lint:fix": "bunx --bun eslint . --fix"
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "version": "bun scripts/changelog.ts",
+    "publish:dry": "npx jsr publish --dry-run --allow-slow-types --allow-dirty",
+    "prepare": "husky"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@antfu/eslint-config": "^8.0.0",
+    "@types/bun": "latest",
+    "eslint": "^10.1.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "lint-staged": {
+    "*.ts": "eslint --fix"
   }
 }

@@ -1,4 +1,4 @@
-import type { Schema } from "./types.ts";
+import type { Schema } from './types.ts';
 
 /**
  * Lightweight JSON Schema validator.
@@ -31,13 +31,15 @@ export interface JSONSchemaDefinition {
   maxItems?: number;
 }
 
+const REF_PREFIX_PATTERN = /^#\//;
+
 export class ValidationError extends Error {
   constructor(
     message: string,
     public path: string[] = [],
   ) {
     super(message);
-    this.name = "ValidationError";
+    this.name = 'ValidationError';
   }
 }
 
@@ -54,12 +56,13 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
 
   private resolve(schema: JSONSchemaDefinition): JSONSchemaDefinition {
     if (schema.$ref) {
-      const refPath = schema.$ref.replace(/^#\//, "").split("/");
+      const refPath = schema.$ref.replace(REF_PREFIX_PATTERN, '').split('/');
       let resolved: Record<string, unknown> = this.definitions as Record<string, unknown>;
       for (const segment of refPath) {
-        if (resolved && typeof resolved === "object" && segment in resolved) {
+        if (resolved && typeof resolved === 'object' && segment in resolved) {
           resolved = resolved[segment] as Record<string, unknown>;
-        } else {
+        }
+        else {
           throw new ValidationError(`Cannot resolve $ref: ${schema.$ref}`);
         }
       }
@@ -77,9 +80,11 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
 
     // nullable check
     if (data === null) {
-      if (schema.nullable) return;
+      if (schema.nullable)
+        return;
       const types = Array.isArray(schema.type) ? schema.type : [schema.type];
-      if (types.includes("null")) return;
+      if (types.includes('null'))
+        return;
       throw new ValidationError(
         `Expected non-null value at ${pathStr(path)}`,
         path,
@@ -101,7 +106,8 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
         try {
           this.validate(data, sub, path);
           matches++;
-        } catch {
+        }
+        catch {
           // not a match
         }
       }
@@ -120,7 +126,8 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
         try {
           this.validate(data, sub, path);
           return;
-        } catch {
+        }
+        catch {
           // try next
         }
       }
@@ -134,7 +141,7 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
     if (schema.enum) {
       if (!schema.enum.includes(data)) {
         throw new ValidationError(
-          `Value ${JSON.stringify(data)} not in enum [${schema.enum.map((v) => JSON.stringify(v)).join(", ")}] at ${pathStr(path)}`,
+          `Value ${JSON.stringify(data)} not in enum [${schema.enum.map(v => JSON.stringify(v)).join(', ')}] at ${pathStr(path)}`,
           path,
         );
       }
@@ -146,18 +153,18 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
       const types = Array.isArray(schema.type) ? schema.type : [schema.type];
       const actualType = getJSONType(data);
       // In JSON Schema, "number" matches integers too
-      const matches = types.includes(actualType) ||
-        (actualType === "integer" && types.includes("number"));
+      const matches = types.includes(actualType)
+        || (actualType === 'integer' && types.includes('number'));
       if (!matches) {
         throw new ValidationError(
-          `Expected ${types.join(" | ")} but got ${actualType} at ${pathStr(path)}`,
+          `Expected ${types.join(' | ')} but got ${actualType} at ${pathStr(path)}`,
           path,
         );
       }
     }
 
     // string constraints
-    if (schema.type === "string" && typeof data === "string") {
+    if (schema.type === 'string' && typeof data === 'string') {
       if (schema.minLength !== undefined && data.length < schema.minLength) {
         throw new ValidationError(
           `String too short (min ${schema.minLength}) at ${pathStr(path)}`,
@@ -180,8 +187,8 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
 
     // number constraints
     if (
-      (schema.type === "number" || schema.type === "integer") &&
-      typeof data === "number"
+      (schema.type === 'number' || schema.type === 'integer')
+      && typeof data === 'number'
     ) {
       if (schema.minimum !== undefined && data < schema.minimum) {
         throw new ValidationError(
@@ -198,8 +205,8 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
     }
 
     // object
-    if (schema.type === "object" || schema.properties) {
-      if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    if (schema.type === 'object' || schema.properties) {
+      if (typeof data !== 'object' || data === null || Array.isArray(data)) {
         throw new ValidationError(
           `Expected object at ${pathStr(path)}`,
           path,
@@ -230,7 +237,7 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
     }
 
     // array
-    if (schema.type === "array" || schema.items) {
+    if (schema.type === 'array' || schema.items) {
       if (!Array.isArray(data)) {
         throw new ValidationError(
           `Expected array at ${pathStr(path)}`,
@@ -259,14 +266,16 @@ export class JSONSchemaValidator<T = unknown> implements Schema<T> {
 }
 
 function getJSONType(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "array";
-  if (typeof value === "number") {
-    return Number.isInteger(value) ? "integer" : "number";
+  if (value === null)
+    return 'null';
+  if (Array.isArray(value))
+    return 'array';
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? 'integer' : 'number';
   }
   return typeof value; // "string" | "boolean" | "object" | "undefined"
 }
 
 function pathStr(path: string[]): string {
-  return path.length === 0 ? "root" : path.join(".");
+  return path.length === 0 ? 'root' : path.join('.');
 }

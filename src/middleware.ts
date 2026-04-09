@@ -1,4 +1,4 @@
-import type { Middleware } from "./types.ts";
+import type { Middleware } from './types.ts';
 
 /**
  * Attaches a Bearer token to the Authorization header.
@@ -11,7 +11,7 @@ export function authBearer(
   return async (request, next) => {
     const token = await getToken();
     if (token) {
-      request.headers.set("Authorization", `Bearer ${token}`);
+      request.headers.set('Authorization', `Bearer ${token}`);
     }
     return next();
   };

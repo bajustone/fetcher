@@ -1,13 +1,14 @@
-import { executeMiddleware } from "./middleware.ts";
 import type {
   FetchConfig,
-  Routes,
-  TypedFetchFn,
-  TypedResponse,
+  FetchFn,
   ResultData,
   RouteDefinition,
+  Routes,
   Schema,
-} from "./types.ts";
+  TypedFetchFn,
+  TypedResponse,
+} from './types.ts';
+import { executeMiddleware } from './middleware.ts';
 
 /**
  * Creates a typed fetch function. Returns a function with the same shape as
@@ -46,7 +47,7 @@ export function createFetch<R extends Routes = Routes>(
 
   const fetchFn = (path: string, options: Record<string, unknown> = {}): Promise<TypedResponse> => {
     const {
-      method = "GET",
+      method = 'GET',
       body,
       params,
       query,
@@ -69,7 +70,7 @@ export function createFetch<R extends Routes = Routes>(
     );
 
     // Query params
-    if (query && typeof query === "object") {
+    if (query && typeof query === 'object') {
       const searchParams = new URLSearchParams();
       for (const [key, value] of Object.entries(
         query as Record<string, unknown>,
@@ -79,7 +80,8 @@ export function createFetch<R extends Routes = Routes>(
         }
       }
       const qs = searchParams.toString();
-      if (qs) url += `?${qs}`;
+      if (qs)
+        url += `?${qs}`;
     }
 
     // Build headers
@@ -98,17 +100,18 @@ export function createFetch<R extends Routes = Routes>(
       }
 
       if (
-        typeof body === "string" ||
-        body instanceof FormData ||
-        body instanceof Blob ||
-        body instanceof ArrayBuffer ||
-        body instanceof URLSearchParams
+        typeof body === 'string'
+        || body instanceof FormData
+        || body instanceof Blob
+        || body instanceof ArrayBuffer
+        || body instanceof URLSearchParams
       ) {
         serializedBody = body;
-      } else {
+      }
+      else {
         serializedBody = JSON.stringify(body);
-        if (!headers.has("Content-Type")) {
-          headers.set("Content-Type", "application/json");
+        if (!headers.has('Content-Type')) {
+          headers.set('Content-Type', 'application/json');
         }
       }
     }
@@ -122,26 +125,26 @@ export function createFetch<R extends Routes = Routes>(
     });
 
     // Determine the response schema
-    const responseSchema: Schema | undefined =
-      (adHocResponseSchema as Schema | undefined) ?? routeDef?.response;
+    const responseSchema: Schema | undefined
+      = (adHocResponseSchema as Schema | undefined) ?? routeDef?.response;
 
     const errorResponseSchema: Schema | undefined = routeDef?.errorResponse;
 
     // Pick the fetch implementation
-    const actualFetch =
-      (callFetchFn as typeof globalThis.fetch) ??
-      defaultFetchFn ??
-      globalThis.fetch;
+    const actualFetch: FetchFn
+      = (callFetchFn as FetchFn | undefined)
+        ?? defaultFetchFn
+        ?? (req => globalThis.fetch(req));
 
     // Execute through middleware chain
     const responsePromise = executeMiddleware(
       middleware,
       request,
-      (req) => actualFetch(req),
+      req => actualFetch(req),
     );
 
     // Wrap the response with .result()
-    return responsePromise.then((response) =>
+    return responsePromise.then(response =>
       wrapResponse(response, responseSchema, errorResponseSchema),
     );
   };
@@ -162,8 +165,8 @@ function wrapResponse<T, E>(
 
   typedResponse.result = async (): Promise<ResultData<T, E>> => {
     try {
-      const contentType = cloned.headers.get("content-type") ?? "";
-      const isJSON = contentType.includes("application/json");
+      const contentType = cloned.headers.get('content-type') ?? '';
+      const isJSON = contentType.includes('application/json');
 
       if (!cloned.ok) {
         if (isJSON) {
@@ -187,7 +190,8 @@ function wrapResponse<T, E>(
 
       const textBody = await cloned.text();
       return { data: textBody as T };
-    } catch (err) {
+    }
+    catch (err) {
       return {
         error: (err instanceof Error ? err : new Error(String(err))) as E,
       };
@@ -201,7 +205,8 @@ function interpolatePath(
   path: string,
   params?: Record<string, string>,
 ): string {
-  if (!params) return path;
+  if (!params)
+    return path;
   return path.replace(/\{([^}]+)\}/g, (_, key: string) => {
     const value = params[key];
     if (value === undefined) {

@@ -1,6 +1,6 @@
 /** Universal schema interface — works with Zod v4, Valibot, ArkType, or any custom validator */
 export interface Schema<T = unknown> {
-  parse(data: unknown): T;
+  parse: (data: unknown) => T;
 }
 
 /** Infer the output type of a Schema */
@@ -10,23 +10,23 @@ export type InferSchema<S> = S extends Schema<infer T> ? T : unknown;
 // Result
 // ---------------------------------------------------------------------------
 
-export type ResultData<T, E = unknown> =
-  | { data: T; error?: undefined }
-  | { data?: undefined; error: E };
+export type ResultData<T, E = unknown>
+  = | { data: T; error?: undefined }
+    | { data?: undefined; error: E };
 
 // ---------------------------------------------------------------------------
 // Response
 // ---------------------------------------------------------------------------
 
 export interface TypedResponse<T = unknown, E = unknown> extends Response {
-  result(): Promise<ResultData<T, E>>;
+  result: () => Promise<ResultData<T, E>>;
 }
 
 // ---------------------------------------------------------------------------
 // Route definitions
 // ---------------------------------------------------------------------------
 
-export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
 
 export interface RouteDefinition {
   body?: Schema;
@@ -51,12 +51,19 @@ export type Middleware = (
 // Config
 // ---------------------------------------------------------------------------
 
+/**
+ * A minimal fetch-compatible function. Narrower than `typeof globalThis.fetch`
+ * so that simple mocks (e.g. `async () => new Response(...)`) assign cleanly
+ * without having to implement static properties like `preconnect`.
+ */
+export type FetchFn = (request: Request) => Promise<Response>;
+
 export interface FetchConfig<R extends Routes = Routes> {
   baseUrl: string;
   routes?: R;
   middleware?: Middleware[];
   defaultHeaders?: Record<string, string>;
-  fetch?: typeof globalThis.fetch;
+  fetch?: FetchFn;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,8 +71,8 @@ export interface FetchConfig<R extends Routes = Routes> {
 // ---------------------------------------------------------------------------
 
 /** Extract path parameter names from a template string like "/users/{id}/posts/{postId}" */
-export type ExtractPathParams<Path extends string> =
-  Path extends `${string}{${infer Param}}${infer Rest}`
+export type ExtractPathParams<Path extends string>
+  = Path extends `${string}{${infer Param}}${infer Rest}`
     ? Param | ExtractPathParams<Rest>
     : never;
 
@@ -113,26 +120,26 @@ export type TypedFetchOptions<
   R extends Routes,
   P extends string,
   M extends string,
-> = Omit<RequestInit, "method" | "body"> & {
+> = Omit<RequestInit, 'method' | 'body'> & {
   method: M;
-  fetch?: typeof globalThis.fetch;
+  fetch?: FetchFn;
   responseSchema?: Schema;
 } & (ResolveBody<R, P, M> extends never
-    ? { body?: unknown }
-    : { body: ResolveBody<R, P, M> }) &
-  ([ExtractPathParams<P>] extends [never]
-    ? { params?: undefined }
-    : { params: Record<ExtractPathParams<P>, string> }) & {
+  ? { body?: unknown }
+  : { body: ResolveBody<R, P, M> })
+& ([ExtractPathParams<P>] extends [never]
+  ? { params?: undefined }
+  : { params: Record<ExtractPathParams<P>, string> }) & {
     query?: Record<string, string | number | boolean | undefined>;
   };
 
 /** Untyped fetch options for unknown routes */
-type UntypedFetchOptions = Omit<RequestInit, "method" | "body"> & {
+type UntypedFetchOptions = Omit<RequestInit, 'method' | 'body'> & {
   method: string;
   body?: unknown;
   params?: Record<string, string>;
   query?: Record<string, string | number | boolean | undefined>;
-  fetch?: typeof globalThis.fetch;
+  fetch?: FetchFn;
   responseSchema?: Schema;
 };
 

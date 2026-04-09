@@ -1,10 +1,11 @@
 {
   "name": "@bajustone/fetcher",
   "version": "0.0.1",
+  "license": "MIT",
   "exports": {
     ".": "./src/index.ts"
   },
   "publish": {
-    "include": ["src/**/*.ts", "LICENSE", "README.md"]
+    "include": ["src/**/*.ts", "LICENSE", "README.md", "jsr.json"]
   }
 }

@@ -1,6 +1,6 @@
-import { JSONSchemaValidator } from "./json-schema-validator.ts";
-import type { JSONSchemaDefinition } from "./json-schema-validator.ts";
-import type { HttpMethod, RouteDefinition, Routes } from "./types.ts";
+import type { JSONSchemaDefinition } from './json-schema-validator.ts';
+import type { HttpMethod, RouteDefinition, Routes } from './types.ts';
+import { JSONSchemaValidator } from './json-schema-validator.ts';
 
 interface OpenAPISpec {
   openapi: string;
@@ -31,13 +31,17 @@ interface OpenAPIOperation {
 
 interface OpenAPIParameter {
   name: string;
-  in: "path" | "query" | "header" | "cookie";
+  in: 'path' | 'query' | 'header' | 'cookie';
   required?: boolean;
   schema?: JSONSchemaDefinition;
 }
 
 const HTTP_METHODS: Set<string> = new Set([
-  "get", "post", "put", "delete", "patch",
+  'get',
+  'post',
+  'put',
+  'delete',
+  'patch',
 ]);
 
 /**
@@ -55,13 +59,15 @@ export function fromOpenAPI(spec: OpenAPISpec): Routes {
   const definitions = buildDefinitions(spec);
   const routes: Routes = {};
 
-  if (!spec.paths) return routes;
+  if (!spec.paths)
+    return routes;
 
   for (const [path, pathItem] of Object.entries(spec.paths)) {
     const methodDefs: Partial<Record<HttpMethod, RouteDefinition>> = {};
 
     for (const [method, operation] of Object.entries(pathItem)) {
-      if (!HTTP_METHODS.has(method)) continue;
+      if (!HTTP_METHODS.has(method))
+        continue;
 
       const routeDef: RouteDefinition = {};
 
@@ -90,12 +96,12 @@ export function fromOpenAPI(spec: OpenAPISpec): Routes {
       }
 
       // Path + query parameters
-      const params = extractParams(operation, "path");
+      const params = extractParams(operation, 'path');
       if (params) {
         routeDef.params = new JSONSchemaValidator(params, definitions);
       }
 
-      const query = extractParams(operation, "query");
+      const query = extractParams(operation, 'query');
       if (query) {
         routeDef.query = new JSONSchemaValidator(query, definitions);
       }
@@ -117,18 +123,14 @@ function buildDefinitions(
 ): Record<string, JSONSchemaDefinition> {
   const defs: Record<string, Record<string, JSONSchemaDefinition>> = {};
   if (spec.components?.schemas) {
-    defs["components"] = { schemas: spec.components.schemas as unknown as JSONSchemaDefinition } as unknown as Record<string, JSONSchemaDefinition>;
+    defs.components = { schemas: spec.components.schemas as unknown as JSONSchemaDefinition } as unknown as Record<string, JSONSchemaDefinition>;
     // Flatten for easier resolution: components/schemas/Foo
     const flat: Record<string, JSONSchemaDefinition> = {};
     for (const [name, schema] of Object.entries(spec.components.schemas)) {
-      flat[`components`] ??= {} as unknown as JSONSchemaDefinition;
-      (flat as Record<string, Record<string, unknown>>)["components"]![
-        "schemas"
-      ] ??= {};
+      flat.components ??= {} as unknown as JSONSchemaDefinition;
+      (flat as Record<string, Record<string, unknown>>).components!.schemas ??= {};
       (
-        (flat as Record<string, Record<string, Record<string, unknown>>>)[
-          "components"
-        ]!["schemas"]!
+        (flat as Record<string, Record<string, Record<string, unknown>>>).components!.schemas!
       )[name] = schema;
     }
     return flat;
@@ -140,24 +142,28 @@ function extractBodySchema(
   operation: OpenAPIOperation,
 ): JSONSchemaDefinition | null {
   const content = operation.requestBody?.content;
-  if (!content) return null;
-  const jsonContent =
-    content["application/json"] ?? content["*/*"];
+  if (!content)
+    return null;
+  const jsonContent
+    = content['application/json'] ?? content['*/*'];
   return jsonContent?.schema ?? null;
 }
 
 function extractResponseSchema(
   operation: OpenAPIOperation,
 ): JSONSchemaDefinition | null {
-  if (!operation.responses) return null;
+  if (!operation.responses)
+    return null;
   // Find first 2xx response
   for (const [code, response] of Object.entries(operation.responses)) {
-    if (code.startsWith("2") || code === "default") {
+    if (code.startsWith('2') || code === 'default') {
       const content = response.content;
-      if (!content) continue;
-      const jsonContent =
-        content["application/json"] ?? content["*/*"];
-      if (jsonContent?.schema) return jsonContent.schema;
+      if (!content)
+        continue;
+      const jsonContent
+        = content['application/json'] ?? content['*/*'];
+      if (jsonContent?.schema)
+        return jsonContent.schema;
     }
   }
   return null;
@@ -166,14 +172,17 @@ function extractResponseSchema(
 function extractErrorSchema(
   operation: OpenAPIOperation,
 ): JSONSchemaDefinition | null {
-  if (!operation.responses) return null;
+  if (!operation.responses)
+    return null;
   for (const [code, response] of Object.entries(operation.responses)) {
-    if (code.startsWith("4") || code.startsWith("5")) {
+    if (code.startsWith('4') || code.startsWith('5')) {
       const content = response.content;
-      if (!content) continue;
-      const jsonContent =
-        content["application/json"] ?? content["*/*"];
-      if (jsonContent?.schema) return jsonContent.schema;
+      if (!content)
+        continue;
+      const jsonContent
+        = content['application/json'] ?? content['*/*'];
+      if (jsonContent?.schema)
+        return jsonContent.schema;
     }
   }
   return null;
@@ -181,23 +190,24 @@ function extractErrorSchema(
 
 function extractParams(
   operation: OpenAPIOperation,
-  location: "path" | "query",
+  location: 'path' | 'query',
 ): JSONSchemaDefinition | null {
-  const params = operation.parameters?.filter((p) => p.in === location);
-  if (!params || params.length === 0) return null;
+  const params = operation.parameters?.filter(p => p.in === location);
+  if (!params || params.length === 0)
+    return null;
 
   const properties: Record<string, JSONSchemaDefinition> = {};
   const required: string[] = [];
 
   for (const param of params) {
-    properties[param.name] = param.schema ?? { type: "string" };
+    properties[param.name] = param.schema ?? { type: 'string' };
     if (param.required) {
       required.push(param.name);
     }
   }
 
   return {
-    type: "object",
+    type: 'object',
     properties,
     ...(required.length > 0 ? { required } : {}),
   };
