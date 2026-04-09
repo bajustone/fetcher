@@ -1,6 +1,6 @@
 {
   "name": "@bajustone/fetcher",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Schema-validated, typed fetch client with OpenAPI support",
   "type": "module",
   "module": "src/index.ts",
