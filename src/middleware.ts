@@ -35,7 +35,16 @@ export function authBearer(
   };
 }
 
-/** Executes a middleware chain, ending with the actual fetch call */
+/**
+ * Runs a middleware chain around a final fetch call. Each middleware in
+ * `middlewares` is invoked in order; calling `next()` inside a middleware
+ * advances to the next one, and the terminal `next()` invokes `finalFetch`.
+ *
+ * Exported for advanced use (e.g. composing custom clients); the typical
+ * consumer should configure middlewares via `createFetch({ middleware })`.
+ *
+ * @internal
+ */
 export function executeMiddleware(
   middlewares: Middleware[],
   request: Request,

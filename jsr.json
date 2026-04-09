@@ -1,8 +1,7 @@
 {
   "name": "@bajustone/fetcher",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "license": "MIT",
-  "description": "Schema-validated, typed fetch client with OpenAPI support. Wraps native fetch, extends Response with a typed .result() method, works with Zod, Valibot, ArkType, or any schema that has .parse().",
   "exports": {
     ".": "./src/index.ts"
   },
