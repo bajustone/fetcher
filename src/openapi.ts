@@ -1,3 +1,11 @@
+/**
+ * OpenAPI 3.x adapter — converts a spec into a `Routes` table that
+ * {@link createFetch} can consume, with JSON Schema validation on every
+ * body, params, query, and response.
+ *
+ * @module
+ */
+
 import type { JSONSchemaDefinition } from './json-schema-validator.ts';
 import type { HttpMethod, RouteDefinition, Routes } from './types.ts';
 import { JSONSchemaValidator } from './json-schema-validator.ts';

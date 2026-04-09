@@ -1,12 +1,22 @@
+/**
+ * Lightweight JSON Schema validator — the runtime used internally by
+ * {@link fromOpenAPI} so that `@bajustone/fetcher` ships with no external
+ * validation dependencies.
+ *
+ * Supports the subset of JSON Schema needed for OpenAPI 3.x response
+ * validation: `object`, `array`, `string`, `number`, `integer`, `boolean`,
+ * `enum`, `required`, `nullable`, `oneOf`, `anyOf`, `allOf`, and `$ref`
+ * resolution.
+ *
+ * @module
+ */
+
 import type { Schema } from './types.ts';
 
 /**
- * Lightweight JSON Schema validator.
- * Supports the subset of JSON Schema needed for OpenAPI 3.x response validation:
- * object, array, string, number, integer, boolean, enum, required, nullable,
- * oneOf, anyOf, allOf, $ref resolution.
+ * A JSON Schema node. Only the fields this validator understands are declared
+ * — other keywords are ignored during validation.
  */
-
 export interface JSONSchemaDefinition {
   type?: string | string[];
   properties?: Record<string, JSONSchemaDefinition>;
@@ -33,6 +43,11 @@ export interface JSONSchemaDefinition {
 
 const REF_PREFIX_PATTERN = /^#\//;
 
+/**
+ * Thrown by {@link JSONSchemaValidator.parse} when the input does not match
+ * the schema. The `path` array points at the exact location in the input
+ * tree where validation failed (e.g. `['user', 'email']`).
+ */
 export class ValidationError extends Error {
   constructor(
     message: string,
@@ -43,12 +58,34 @@ export class ValidationError extends Error {
   }
 }
 
+/**
+ * Validates data against a {@link JSONSchemaDefinition}. Implements the
+ * universal {@link Schema} interface, so instances can be dropped anywhere
+ * `@bajustone/fetcher` expects a schema.
+ *
+ * @example
+ * ```typescript
+ * const validator = new JSONSchemaValidator<{ id: string }>({
+ *   type: 'object',
+ *   properties: { id: { type: 'string' } },
+ *   required: ['id'],
+ * });
+ *
+ * validator.parse({ id: '42' }); // ok
+ * validator.parse({}); // throws ValidationError
+ * ```
+ */
 export class JSONSchemaValidator<T = unknown> implements Schema<T> {
   constructor(
     private schema: JSONSchemaDefinition,
     private definitions: Record<string, JSONSchemaDefinition> = {},
   ) {}
 
+  /**
+   * Validates `data` against the schema. Returns the input cast to `T` on
+   * success, or throws a {@link ValidationError} pointing at the offending
+   * field on failure.
+   */
   parse(data: unknown): T {
     this.validate(data, this.schema, []);
     return data as T;

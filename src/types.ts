@@ -1,4 +1,20 @@
-/** Universal schema interface — works with Zod v4, Valibot, ArkType, or any custom validator */
+/**
+ * Public type definitions shared across `@bajustone/fetcher`: the universal
+ * `Schema` contract, the `TypedResponse`/`ResultData` extension of the
+ * native `Response`, and the `Routes` / `RouteDefinition` shapes that drive
+ * type inference.
+ *
+ * @module
+ */
+
+/**
+ * The universal schema interface accepted by `@bajustone/fetcher`. Any
+ * object with a `parse(data): T` method works — Zod v4, Valibot, ArkType,
+ * or a hand-rolled validator.
+ *
+ * `parse` must either return the validated value or throw if the input is
+ * invalid.
+ */
 export interface Schema<T = unknown> {
   parse: (data: unknown) => T;
 }

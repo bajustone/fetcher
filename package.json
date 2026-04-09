@@ -13,7 +13,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "version": "bun scripts/changelog.ts",
-    "publish:dry": "npx jsr publish --dry-run --allow-slow-types --allow-dirty",
+    "publish:dry": "npx jsr publish --dry-run --allow-dirty",
     "prepare": "husky"
   },
   "devDependencies": {

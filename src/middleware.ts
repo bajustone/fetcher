@@ -1,9 +1,27 @@
+/**
+ * Built-in middleware helpers and the middleware chain executor used
+ * internally by {@link createFetch}.
+ *
+ * @module
+ */
+
 import type { Middleware } from './types.ts';
 
 /**
- * Attaches a Bearer token to the Authorization header.
- * The `getToken` function is called on every request, so it can return
- * a fresh token each time (e.g., from a token store or refresh flow).
+ * Builds a middleware that attaches an `Authorization: Bearer <token>`
+ * header on every outgoing request. `getToken` is invoked per-request, so
+ * it can return a fresh token each time (e.g. from a token store or a
+ * refresh flow) and may be async.
+ *
+ * @example
+ * ```typescript
+ * import { authBearer, createFetch } from '@bajustone/fetcher';
+ *
+ * const f = createFetch({
+ *   baseUrl: 'https://api.example.com',
+ *   middleware: [authBearer(() => localStorage.getItem('token'))],
+ * });
+ * ```
  */
 export function authBearer(
   getToken: () => string | null | undefined | Promise<string | null | undefined>,

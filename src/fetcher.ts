@@ -1,3 +1,11 @@
+/**
+ * Core fetch factory — returns a typed `fetch`-shaped function that validates
+ * requests/responses against a `Routes` table and extends each `Response`
+ * with a `.result()` method.
+ *
+ * @module
+ */
+
 import type {
   FetchConfig,
   FetchFn,
