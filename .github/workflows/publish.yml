@@ -1,0 +1,20 @@
+name: Publish
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish-jsr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Sync version from package.json to jsr.json
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          jq --arg v "$VERSION" '.version = $v' jsr.json > jsr.tmp && mv jsr.tmp jsr.json
+      - run: npx jsr publish --allow-slow-types --allow-dirty
