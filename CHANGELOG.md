@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.6] - 2026-04-09
+
+### Added
+- rework: result model, middleware, retry/timeout, OpenAPI typing
+
 ## [0.0.5] - 2026-04-09
 
 ### Fixed
