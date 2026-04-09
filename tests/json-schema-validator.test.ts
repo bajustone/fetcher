@@ -222,4 +222,54 @@ describe('JSONSchemaValidator', () => {
       expect(() => v.parse({ user: {} })).toThrow(ValidationError);
     });
   });
+
+  describe('Standard Schema V1 contract', () => {
+    it('exposes a ~standard property with version 1 and a vendor', () => {
+      const v = new JSONSchemaValidator({ type: 'string' });
+      expect(v['~standard'].version).toBe(1);
+      expect(typeof v['~standard'].vendor).toBe('string');
+      expect(v['~standard'].vendor.length).toBeGreaterThan(0);
+    });
+
+    it('returns { value } on success', async () => {
+      const v = new JSONSchemaValidator<{ id: string }>({
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+      });
+      const result = await v['~standard'].validate({ id: '42' });
+      expect(result.issues).toBeUndefined();
+      expect(result.value).toEqual({ id: '42' });
+    });
+
+    it('returns { issues } on failure without throwing', async () => {
+      const v = new JSONSchemaValidator<{ id: string }>({
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+      });
+      const result = await v['~standard'].validate({});
+      expect(result.value).toBeUndefined();
+      expect(result.issues).toBeDefined();
+      expect(result.issues!.length).toBeGreaterThan(0);
+      expect(typeof result.issues![0]!.message).toBe('string');
+    });
+
+    it('attaches the failing path on issues', async () => {
+      const v = new JSONSchemaValidator({
+        type: 'object',
+        properties: {
+          user: {
+            type: 'object',
+            properties: { email: { type: 'string' } },
+            required: ['email'],
+          },
+        },
+        required: ['user'],
+      });
+      const result = await v['~standard'].validate({ user: {} });
+      expect(result.issues).toBeDefined();
+      expect(result.issues![0]!.path).toBeDefined();
+    });
+  });
 });

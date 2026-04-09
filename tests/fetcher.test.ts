@@ -25,9 +25,24 @@ function mockTextFetch(body: string, status = 200): FetchFn {
     });
 }
 
-/** Simple schema for testing */
+/** Simple Standard Schema V1 helper for testing */
 function schema<T>(validate: (data: unknown) => T): Schema<T> {
-  return { parse: validate };
+  return {
+    '~standard': {
+      version: 1,
+      vendor: 'fetcher-test',
+      validate: (value: unknown) => {
+        try {
+          return { value: validate(value) };
+        }
+        catch (err) {
+          return {
+            issues: [{ message: err instanceof Error ? err.message : String(err) }],
+          };
+        }
+      },
+    },
+  };
 }
 
 describe('createFetch', () => {
@@ -42,9 +57,10 @@ describe('createFetch', () => {
       expect(response.ok).toBe(true);
       expect(response.status).toBe(200);
 
-      const { data, error } = await response.result();
-      expect(data).toEqual({ message: 'hello' });
-      expect(error).toBeUndefined();
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ message: 'hello' });
     });
 
     it('makes a POST request with JSON body', async () => {
@@ -70,8 +86,10 @@ describe('createFetch', () => {
       const sentBody = await capturedRequest!.json();
       expect(sentBody).toEqual({ name: 'Alice' });
 
-      const { data } = await response.result();
-      expect(data).toEqual({ id: 1 });
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ id: 1 });
     });
 
     it('returns a real Response — native methods work', async () => {
@@ -94,8 +112,10 @@ describe('createFetch', () => {
       });
 
       const response = await f('/text', { method: 'GET' });
-      const { data } = await response.result();
-      expect(data).toBe('plain text');
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toBe('plain text');
     });
   });
 
@@ -191,7 +211,7 @@ describe('createFetch', () => {
   });
 
   describe('error responses', () => {
-    it('returns error for non-ok responses', async () => {
+    it('returns kind:http error for non-ok JSON responses', async () => {
       const f = createFetch({
         baseUrl: 'https://api.example.com',
         fetch: mockFetch({ message: 'Not found' }, 404),
@@ -201,20 +221,55 @@ describe('createFetch', () => {
       expect(response.ok).toBe(false);
       expect(response.status).toBe(404);
 
-      const { data, error } = await response.result();
-      expect(data).toBeUndefined();
-      expect(error).toEqual({ message: 'Not found' });
+      const result = await response.result();
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === 'http') {
+        expect(result.error.status).toBe(404);
+        expect(result.error.body).toEqual({ message: 'Not found' });
+      }
+      else {
+        throw new Error('expected kind:http error');
+      }
     });
 
-    it('handles text error responses', async () => {
+    it('returns kind:http error for non-ok text responses', async () => {
       const f = createFetch({
         baseUrl: 'https://api.example.com',
         fetch: mockTextFetch('Internal Server Error', 500),
       });
 
       const response = await f('/error', { method: 'GET' });
-      const { error } = await response.result();
-      expect(error).toBe('Internal Server Error');
+      const result = await response.result();
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === 'http') {
+        expect(result.error.status).toBe(500);
+        expect(result.error.body).toBe('Internal Server Error');
+      }
+      else {
+        throw new Error('expected kind:http error');
+      }
+    });
+
+    it('returns kind:network error when the underlying fetch rejects', async () => {
+      const networkFailure = new Error('connection refused');
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+
+        fetch: async () => {
+          throw networkFailure;
+        },
+      });
+
+      // Calling f never throws — the rejection surfaces via .result().
+      const response = await f('/test', { method: 'GET' });
+      const result = await response.result();
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === 'network') {
+        expect(result.error.cause).toBe(networkFailure);
+      }
+      else {
+        throw new Error('expected kind:network error');
+      }
     });
   });
 
@@ -238,11 +293,13 @@ describe('createFetch', () => {
       });
 
       const response = await f('/user', { method: 'GET' });
-      const { data } = await response.result();
-      expect(data).toEqual({ name: 'Alice', age: 30 });
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ name: 'Alice', age: 30 });
     });
 
-    it('returns validation error when schema fails', async () => {
+    it('returns kind:validation location:response when response schema fails', async () => {
       const strictSchema = schema((data: unknown) => {
         const obj = data as Record<string, unknown>;
         if (typeof obj.name !== 'string')
@@ -261,9 +318,16 @@ describe('createFetch', () => {
       });
 
       const response = await f('/user', { method: 'GET' });
-      const { data, error } = await response.result();
-      expect(data).toBeUndefined();
-      expect(error).toBeDefined();
+      const result = await response.result();
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === 'validation') {
+        expect(result.error.location).toBe('response');
+        expect(result.error.issues.length).toBeGreaterThan(0);
+        expect(result.error.issues[0]!.message).toContain('name must be string');
+      }
+      else {
+        throw new Error('expected kind:validation location:response');
+      }
     });
 
     it('validates with ad-hoc per-call schema', async () => {
@@ -281,11 +345,14 @@ describe('createFetch', () => {
         responseSchema: mySchema,
       });
 
-      const { data } = await response.result();
-      expect(data).toEqual({ count: 42 });
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ count: 42 });
     });
 
-    it('validates request body against schema', async () => {
+    it('surfaces body validation failure as kind:validation location:body', async () => {
+      let fetchCalled = false;
       const bodySchema = schema((data: unknown) => {
         const obj = data as Record<string, unknown>;
         if (!obj.email)
@@ -300,21 +367,141 @@ describe('createFetch', () => {
             POST: { body: bodySchema },
           },
         },
-        fetch: mockFetch({ token: 'abc' }),
+
+        fetch: async () => {
+          fetchCalled = true;
+          return new Response(JSON.stringify({ token: 'abc' }), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
       });
 
       // Valid body passes
-      const response = await f('/login', {
+      const ok = await f('/login', {
         method: 'POST',
         body: { email: 'test@example.com' },
       });
-      expect(response.ok).toBe(true);
+      const okResult = await ok.result();
+      expect(okResult.ok).toBe(true);
+      expect(fetchCalled).toBe(true);
 
-      // Invalid body throws
-      expect(() =>
-        // @ts-expect-error — intentionally missing required `email` to test validation
-        f('/login', { method: 'POST', body: {} }),
-      ).toThrow('email required');
+      // Invalid body — call resolves to a synthetic response, fetch is NOT
+      // called, error surfaces via .result() as kind:validation location:body.
+      fetchCalled = false;
+      const bad = await f('/login', {
+        method: 'POST',
+        // @ts-expect-error — intentionally missing required `email`
+        body: {},
+      });
+      expect(fetchCalled).toBe(false);
+
+      const badResult = await bad.result();
+      expect(badResult.ok).toBe(false);
+      if (!badResult.ok && badResult.error.kind === 'validation') {
+        expect(badResult.error.location).toBe('body');
+        expect(badResult.error.issues[0]!.message).toContain('email required');
+      }
+      else {
+        throw new Error('expected kind:validation location:body');
+      }
+    });
+
+    it('surfaces params validation failure as kind:validation location:params (§4.A2)', async () => {
+      let fetchCalled = false;
+      const paramsSchema = schema((data: unknown) => {
+        const obj = data as Record<string, unknown>;
+        if (typeof obj.id !== 'string' || obj.id.length === 0)
+          throw new Error('id must be a non-empty string');
+        return obj as { id: string };
+      });
+
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        routes: {
+          '/users/{id}': {
+            GET: { params: paramsSchema },
+          },
+        },
+
+        fetch: async () => {
+          fetchCalled = true;
+          return new Response(JSON.stringify({}), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      // Valid params pass
+      const ok = await f('/users/{id}', {
+        method: 'GET',
+        params: { id: '42' },
+      });
+      expect((await ok.result()).ok).toBe(true);
+      expect(fetchCalled).toBe(true);
+
+      // Invalid params (empty id) — fetch never called
+      fetchCalled = false;
+      const bad = await f('/users/{id}', {
+        method: 'GET',
+        params: { id: '' },
+      });
+      expect(fetchCalled).toBe(false);
+
+      const badResult = await bad.result();
+      expect(badResult.ok).toBe(false);
+      if (!badResult.ok && badResult.error.kind === 'validation') {
+        expect(badResult.error.location).toBe('params');
+        expect(badResult.error.issues[0]!.message).toContain('id must be a non-empty string');
+      }
+      else {
+        throw new Error('expected kind:validation location:params');
+      }
+    });
+
+    it('surfaces query validation failure as kind:validation location:query (§4.A2)', async () => {
+      let fetchCalled = false;
+      const querySchema = schema((data: unknown) => {
+        const obj = data as Record<string, unknown>;
+        if (obj.page !== undefined && (typeof obj.page !== 'number' || obj.page < 1))
+          throw new Error('page must be a positive number');
+        return obj as { page?: number };
+      });
+
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        routes: {
+          '/users': {
+            GET: { query: querySchema },
+          },
+        },
+
+        fetch: async () => {
+          fetchCalled = true;
+          return new Response(JSON.stringify([]), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      // Valid query passes
+      const ok = await f('/users', { method: 'GET', query: { page: 1 } });
+      expect((await ok.result()).ok).toBe(true);
+      expect(fetchCalled).toBe(true);
+
+      // Invalid query — fetch never called
+      fetchCalled = false;
+      const bad = await f('/users', { method: 'GET', query: { page: 0 } });
+      expect(fetchCalled).toBe(false);
+
+      const badResult = await bad.result();
+      expect(badResult.ok).toBe(false);
+      if (!badResult.ok && badResult.error.kind === 'validation') {
+        expect(badResult.error.location).toBe('query');
+        expect(badResult.error.issues[0]!.message).toContain('page must be a positive number');
+      }
+      else {
+        throw new Error('expected kind:validation location:query');
+      }
     });
   });
 
@@ -330,13 +517,17 @@ describe('createFetch', () => {
 
       // Uses default
       const r1 = await f('/test', { method: 'GET' });
-      const { data: d1 } = await r1.result();
-      expect(d1).toEqual({ from: 'default' });
+      const result1 = await r1.result();
+      expect(result1.ok).toBe(true);
+      if (result1.ok)
+        expect(result1.data).toEqual({ from: 'default' });
 
       // Uses override (SvelteKit-style)
       const r2 = await f('/test', { method: 'GET', fetch: overrideMock });
-      const { data: d2 } = await r2.result();
-      expect(d2).toEqual({ from: 'override' });
+      const result2 = await r2.result();
+      expect(result2.ok).toBe(true);
+      if (result2.ok)
+        expect(result2.data).toEqual({ from: 'override' });
     });
   });
 
@@ -451,6 +642,337 @@ describe('createFetch', () => {
 
       await f('/test', { method: 'GET' });
       expect(capturedHeaders!.get('authorization')).toBeNull();
+    });
+  });
+
+  // §4.C1 — the Idea 1 invariant says the returned object is a real
+  // Response, so users must be able to mix .result() with native body
+  // methods on the same response in any order. wrapResponse clones
+  // immediately so the original body is preserved for native access.
+  describe('mixed body consumption (§4.C1)', () => {
+    it('.result() then .json() — both succeed', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ key: 'value' }),
+      });
+
+      const response = await f('/test', { method: 'GET' });
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ key: 'value' });
+
+      // Native .json() still works on the original
+      expect(await response.json()).toEqual({ key: 'value' });
+    });
+
+    it('.json() then .result() — both succeed', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ key: 'value' }),
+      });
+
+      const response = await f('/test', { method: 'GET' });
+      expect(await response.json()).toEqual({ key: 'value' });
+
+      // .result() reads from the clone, independent of the original
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ key: 'value' });
+    });
+
+    it('.result() then .text() — both succeed', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ key: 'value' }),
+      });
+
+      const response = await f('/test', { method: 'GET' });
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+
+      // .text() returns the raw JSON string
+      expect(await response.text()).toBe('{"key":"value"}');
+    });
+
+    it('.result() then .blob() — both succeed', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ key: 'value' }),
+      });
+
+      const response = await f('/test', { method: 'GET' });
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+
+      const blob = await response.blob();
+      expect(blob.size).toBeGreaterThan(0);
+      expect(await blob.text()).toBe('{"key":"value"}');
+    });
+
+    it('.result() then .arrayBuffer() — both succeed', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ key: 'value' }),
+      });
+
+      const response = await f('/test', { method: 'GET' });
+      const result = await response.result();
+      expect(result.ok).toBe(true);
+
+      const buf = await response.arrayBuffer();
+      expect(buf.byteLength).toBeGreaterThan(0);
+    });
+
+    it('parallel .result() and .json() — both succeed', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ key: 'value' }),
+      });
+
+      const response = await f('/test', { method: 'GET' });
+      const [result, json] = await Promise.all([
+        response.result(),
+        response.json(),
+      ]);
+
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ key: 'value' });
+      expect(json).toEqual({ key: 'value' });
+    });
+
+    it('.result() can be called twice (idempotent)', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ count: 1 }),
+      });
+
+      const response = await f('/test', { method: 'GET' });
+      const r1 = await response.result();
+      const r2 = await response.result();
+
+      expect(r1.ok).toBe(true);
+      expect(r2.ok).toBe(true);
+      if (r1.ok && r2.ok) {
+        expect(r1.data).toEqual({ count: 1 });
+        expect(r2.data).toEqual({ count: 1 });
+      }
+    });
+
+    it('HTTP error path: .result() then .text() on the same response', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ code: 'NOT_FOUND' }, 404),
+      });
+
+      const response = await f('/missing', { method: 'GET' });
+      const result = await response.result();
+      expect(result.ok).toBe(false);
+
+      // The original 404 response body is still readable natively
+      expect(await response.text()).toBe('{"code":"NOT_FOUND"}');
+    });
+
+    it('.text() then .result() — error path', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ code: 'NOT_FOUND' }, 404),
+      });
+
+      const response = await f('/missing', { method: 'GET' });
+      expect(await response.text()).toBe('{"code":"NOT_FOUND"}');
+
+      const result = await response.result();
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === 'http') {
+        expect(result.error.status).toBe(404);
+        expect(result.error.body).toEqual({ code: 'NOT_FOUND' });
+      }
+    });
+  });
+
+  // §4.B4 — f.with() instance forking
+  describe('f.with() instance forking', () => {
+    it('inherits baseUrl/routes/defaultHeaders from the parent', async () => {
+      let parentHeaders: Headers | null = null;
+      let childHeaders: Headers | null = null;
+
+      const parent = createFetch({
+        baseUrl: 'https://api.example.com',
+        defaultHeaders: { 'X-Api-Key': 'parent-key' },
+
+        fetch: async (req) => {
+          parentHeaders = req.headers;
+          return new Response(JSON.stringify({ from: 'parent-fetch' }), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      const child = parent.with({});
+
+      const childFetch = async (req: Request): Promise<Response> => {
+        childHeaders = req.headers;
+        return new Response(JSON.stringify({ from: 'child-fetch' }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+      const child2 = parent.with({ fetch: childFetch });
+
+      // Inherits baseUrl + defaultHeaders
+      await child('/test', { method: 'GET' });
+      expect(parentHeaders!.get('x-api-key')).toBe('parent-key');
+
+      // Override only fetch — defaultHeaders still inherited
+      await child2('/test', { method: 'GET' });
+      expect(childHeaders!.get('x-api-key')).toBe('parent-key');
+    });
+
+    it('overrides middleware without affecting the parent', async () => {
+      const parentLog: string[] = [];
+      const childLog: string[] = [];
+
+      const parent = createFetch({
+        baseUrl: 'https://api.example.com',
+        middleware: [
+          async (req, next) => {
+            parentLog.push('parent-mw');
+            return next(req);
+          },
+        ],
+        fetch: async () =>
+          new Response(JSON.stringify({}), {
+            headers: { 'content-type': 'application/json' },
+          }),
+      });
+
+      const child = parent.with({
+        middleware: [
+          async (req, next) => {
+            childLog.push('child-mw');
+            return next(req);
+          },
+        ],
+      });
+
+      await parent('/test', { method: 'GET' });
+      await child('/test', { method: 'GET' });
+
+      // Parent's middleware ran for parent only; child's ran for child only.
+      expect(parentLog).toEqual(['parent-mw']);
+      expect(childLog).toEqual(['child-mw']);
+
+      // Calling parent again confirms the parent's middleware is intact.
+      await parent('/test', { method: 'GET' });
+      expect(parentLog).toEqual(['parent-mw', 'parent-mw']);
+      expect(childLog).toEqual(['child-mw']);
+    });
+  });
+
+  // §4.B3 — method shortcuts
+  describe('method shortcuts', () => {
+    it('f.get(path) is equivalent to f(path, { method: "GET" })', async () => {
+      const captured: string[] = [];
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+
+        fetch: async (req) => {
+          captured.push(req.method);
+          return new Response(JSON.stringify({ ok: true }), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      await f.get('/users');
+      await f('/users', { method: 'GET' });
+
+      expect(captured).toEqual(['GET', 'GET']);
+    });
+
+    it('all five method shortcuts forward the right HTTP verb', async () => {
+      const captured: string[] = [];
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+
+        fetch: async (req) => {
+          captured.push(req.method);
+          return new Response(JSON.stringify({}), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      await f.get('/x');
+      await f.post('/x', { body: { a: 1 } });
+      await f.put('/x', { body: { a: 1 } });
+      await f.delete('/x');
+      await f.patch('/x', { body: { a: 1 } });
+
+      expect(captured).toEqual(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']);
+    });
+
+    it('shortcuts merge per-call options with the injected method', async () => {
+      let capturedHeaders: Headers | null = null;
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+
+        fetch: async (req) => {
+          capturedHeaders = req.headers;
+          return new Response(JSON.stringify({}), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      await f.post('/users', {
+        body: { name: 'Alice' },
+        headers: { 'X-Trace': 'shortcut' },
+      });
+
+      expect(capturedHeaders!.get('x-trace')).toBe('shortcut');
+      expect(capturedHeaders!.get('content-type')).toBe('application/json');
+    });
+
+    it('shortcut on a typed route runs schema validation', async () => {
+      const bodySchema = schema((data: unknown) => {
+        const obj = data as Record<string, unknown>;
+        if (!obj.email)
+          throw new Error('email required');
+        return obj as { email: string };
+      });
+
+      let fetchCalled = false;
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        routes: {
+          '/login': {
+            POST: { body: bodySchema },
+          },
+        },
+
+        fetch: async () => {
+          fetchCalled = true;
+          return new Response(JSON.stringify({ token: 'abc' }), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      // Invalid body via shortcut → kind:validation, fetch never called
+      // @ts-expect-error — intentionally missing required `email`
+      const bad = await f.post('/login', { body: {} });
+      expect(fetchCalled).toBe(false);
+      const badResult = await bad.result();
+      expect(badResult.ok).toBe(false);
+      if (!badResult.ok && badResult.error.kind === 'validation') {
+        expect(badResult.error.location).toBe('body');
+      }
+      else {
+        throw new Error('expected kind:validation location:body');
+      }
     });
   });
 });

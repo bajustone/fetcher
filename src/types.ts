@@ -8,47 +8,140 @@
  */
 
 /**
- * The universal schema interface accepted by `@bajustone/fetcher`. Any
- * object with a `parse(data): T` method works — Zod v4, Valibot, ArkType,
- * or a hand-rolled validator.
- *
- * `parse` must either return the validated value or throw if the input is
- * invalid.
+ * A path segment in a Standard Schema V1 issue. Either a property key or a
+ * `{ key }` wrapper for keys whose path needs additional metadata.
  */
-export interface Schema<T = unknown> {
-  /** Validate `data` and return it typed as `T`, or throw on failure. */
-  parse: (data: unknown) => T;
+export type StandardSchemaV1PathSegment = PropertyKey | { readonly key: PropertyKey };
+
+/**
+ * A single validation issue produced by a Standard Schema V1 validator.
+ */
+export interface StandardSchemaV1Issue {
+  readonly message: string;
+  readonly path?: ReadonlyArray<StandardSchemaV1PathSegment>;
 }
 
 /**
- * Unwraps the output type of a {@link Schema}. `InferSchema<Schema<User>>`
- * resolves to `User`; any non-Schema falls back to `unknown`.
+ * The result of a Standard Schema V1 validation. On success, `value` holds
+ * the validated output and `issues` is undefined. On failure, `issues` holds
+ * the list of problems and `value` is undefined.
  */
-export type InferSchema<S> = S extends Schema<infer T> ? T : unknown;
+export type StandardSchemaV1Result<Output>
+  = | { readonly value: Output; readonly issues?: undefined }
+    | { readonly value?: undefined; readonly issues: ReadonlyArray<StandardSchemaV1Issue> };
+
+/**
+ * Standard Schema V1 — the lightweight cross-library schema spec implemented
+ * by Zod 3.24+, Valibot, ArkType, and others. Any value with a `~standard`
+ * property satisfying this shape can be used as a schema in `@bajustone/fetcher`.
+ *
+ * See https://standardschema.dev for the full spec. The interface is inlined
+ * here so the library has no runtime or type dependency on the spec package.
+ */
+export interface StandardSchemaV1<Input = unknown, Output = Input> {
+  readonly '~standard': {
+    readonly version: 1;
+    readonly vendor: string;
+    readonly validate: (
+      value: unknown,
+    ) => StandardSchemaV1Result<Output> | Promise<StandardSchemaV1Result<Output>>;
+    readonly types?: {
+      readonly input: Input;
+      readonly output: Output;
+    };
+  };
+}
+
+/**
+ * Extracts the validated output type from a Standard Schema V1 schema.
+ * `InferOutput<typeof userSchema>` resolves to whatever `userSchema` produces.
+ */
+export type InferOutput<S extends StandardSchemaV1>
+  = S extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
+
+/**
+ * The universal schema type accepted by `@bajustone/fetcher`. Aliases
+ * {@link StandardSchemaV1} so any value implementing the spec — Zod v4,
+ * Valibot, ArkType, the bundled `JSONSchemaValidator`, or a custom validator
+ * — drops in without a wrapper.
+ *
+ * Users on bare `{ parse(data): T }` validators can wrap them in a five-line
+ * adapter; see the README for the snippet.
+ */
+export type Schema<T = unknown> = StandardSchemaV1<unknown, T>;
+
+/**
+ * Unwraps the output type of a {@link Schema}. Equivalent to
+ * {@link InferOutput} for Standard Schema V1 schemas; preserved as a separate
+ * name for backwards compatibility.
+ */
+export type InferSchema<S> = S extends StandardSchemaV1<unknown, infer T> ? T : unknown;
 
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
 
 /**
- * Discriminated union returned by {@link TypedResponse.result}. On success
- * the `data` field holds the validated value of type `T`; on failure the
- * `error` field holds a value of type `E` (the validated error body, or a
- * thrown `Error` on network/validation failure).
+ * Where in the request/response a validation failure originated. `'body'`,
+ * `'params'`, `'query'` are client-side validation failures (the request
+ * was rejected before being sent); `'response'` is a server-side response
+ * that did not match the declared `response`/`errorResponse` schema.
+ */
+export type FetcherErrorLocation = 'body' | 'params' | 'query' | 'response';
+
+/**
+ * Discriminated error type surfaced by {@link TypedResponse.result}. Every
+ * failure path collapses into one of three kinds:
+ *
+ * - `'network'` — the underlying fetch threw, the body could not be parsed,
+ *   or some other transport-level failure occurred. `cause` holds the raw
+ *   thrown value (typically an `Error`).
+ * - `'validation'` — a Standard Schema V1 validator returned `issues` for
+ *   the body/params/query (client-side, before the request was sent) or
+ *   for the response body (server-side). `location` and `issues` describe
+ *   exactly what failed.
+ * - `'http'` — the server returned a 4xx or 5xx response. `status` holds
+ *   the HTTP status code; `body` holds the parsed (and, if a route
+ *   `errorResponse` schema was declared, validated) error body.
  *
  * @example
  * ```typescript
- * const { data, error } = await response.result();
- * if (error) {
- *   // error: E
- * } else {
- *   // data: T
+ * const result = await response.result();
+ * if (!result.ok) {
+ *   switch (result.error.kind) {
+ *     case 'network': console.error('network', result.error.cause); break;
+ *     case 'validation': console.error('invalid', result.error.location, result.error.issues); break;
+ *     case 'http': console.error('http', result.error.status, result.error.body); break;
+ *   }
  * }
  * ```
  */
-export type ResultData<T, E = unknown>
-  = | { data: T; error?: undefined }
-    | { data?: undefined; error: E };
+export type FetcherError<HttpBody = unknown>
+  = | { readonly kind: 'network'; readonly cause: unknown }
+    | {
+      readonly kind: 'validation';
+      readonly location: FetcherErrorLocation;
+      readonly issues: ReadonlyArray<StandardSchemaV1Issue>;
+    }
+    | { readonly kind: 'http'; readonly status: number; readonly body: HttpBody };
+
+/**
+ * Discriminated union returned by {@link TypedResponse.result}. Narrow on
+ * `result.ok` to access the data or the error:
+ *
+ * @example
+ * ```typescript
+ * const result = await response.result();
+ * if (result.ok) {
+ *   // result.data: T
+ * } else {
+ *   // result.error: FetcherError<HttpBody>
+ * }
+ * ```
+ */
+export type ResultData<T, HttpBody = unknown>
+  = | { readonly ok: true; readonly data: T }
+    | { readonly ok: false; readonly error: FetcherError<HttpBody> };
 
 // ---------------------------------------------------------------------------
 // Response
@@ -59,15 +152,19 @@ export type ResultData<T, E = unknown>
  * `Response` members (`.ok`, `.status`, `.headers`, `.json()`, `.text()`,
  * ...) continue to work — `.result()` is an additive extension that parses
  * the body and runs it through the route's schema.
+ *
+ * The two generics: `T` is the success data type; `HttpErrorBody` is the
+ * type of `error.body` when `error.kind === 'http'`. Both default to
+ * `unknown` when no schemas are declared.
  */
-export interface TypedResponse<T = unknown, E = unknown> extends Response {
+export interface TypedResponse<T = unknown, HttpErrorBody = unknown> extends Response {
   /**
    * Parses the response body and validates it against the route's schema,
    * returning a {@link ResultData} discriminated union. Never throws —
    * network failures, validation errors, and HTTP error responses are all
-   * surfaced via `{ error }`.
+   * surfaced via `{ ok: false, error }`.
    */
-  result: () => Promise<ResultData<T, E>>;
+  result: () => Promise<ResultData<T, HttpErrorBody>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,20 +213,119 @@ export interface RouteDefinition {
 export type Routes = Record<string, Partial<Record<HttpMethod, RouteDefinition>>>;
 
 // ---------------------------------------------------------------------------
+// OpenAPI inference (§4.A7 — Path A minimum)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lowercase HTTP method keys as they appear in an OpenAPI 3.x spec.
+ * Used by {@link InferRoutesFromSpec} to filter path-item keys (which may
+ * also include `summary`, `description`, `parameters`, etc.) down to just
+ * the methods this library supports.
+ */
+type LowercaseHttpMethod = 'get' | 'post' | 'put' | 'delete' | 'patch';
+
+/**
+ * Walks the literal type of an OpenAPI spec and produces a narrowed
+ * {@link Routes} shape that preserves the spec's path keys and method
+ * keys, so `f('/pets/{petId}', { method: 'GET' })` autocompletes the path
+ * and narrows the method.
+ *
+ * **What is inferred (Path A minimum):**
+ * - Path keys (e.g. `/pets`, `/pets/{petId}`)
+ * - Method keys per path (`GET`, `POST`, etc., uppercased from the spec)
+ * - Path parameters from the path template (via `ExtractPathParams`)
+ *
+ * **What is NOT inferred yet:**
+ * - Body, response, or errorResponse types from the spec's JSON Schemas.
+ *   Each route's schema slots are typed as `RouteDefinition` (all-optional)
+ *   so the runtime validators built by `fromOpenAPI` are still active —
+ *   you just don't get static `data: T` inference from the spec.
+ *
+ * For typed responses today, layer a per-call `responseSchema: z.object(...)`
+ * on top — the §4.A1 generic flows the inferred output through to
+ * `result.data` regardless of what the route declares.
+ *
+ * Body/response inference from the spec is a follow-up: it requires a
+ * type-level JSON Schema → TS converter that mirrors the runtime
+ * `JSONSchemaValidator`'s supported subset.
+ *
+ * @example
+ * ```typescript
+ * import spec from './openapi.json';
+ *
+ * const f = createFetch({
+ *   baseUrl: 'https://api.example.com',
+ *   routes: fromOpenAPI(spec), // routes type is narrowed to spec literals
+ * });
+ *
+ * f('/pets', { method: 'GET' });        // path autocompletes
+ * f('/pets/{petId}', { method: 'GET', params: { petId: '42' } });
+ * ```
+ */
+export type InferRoutesFromSpec<S>
+  = S extends { paths: infer Paths }
+    ? Paths extends Record<string, unknown>
+      ? {
+          [P in keyof Paths & string]: {
+            [M in keyof Paths[P] & LowercaseHttpMethod as Uppercase<M>]: RouteDefinition;
+          };
+        }
+      : Routes
+    : Routes;
+
+// ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
 
 /**
- * A request/response middleware function — same shape as Hono / Koa.
- * Middlewares receive the outgoing `Request` and a `next()` continuation
- * that invokes the rest of the chain (and ultimately the real fetch), and
- * return the final `Response`. They may mutate request headers, short-
- * circuit with a synthetic response, or wrap the returned promise.
+ * A request/response middleware function — Hono/Koa-shaped, with one
+ * extension: the `next` continuation accepts an optional `Request` argument.
+ *
+ * Calling `next()` (no argument) re-runs the rest of the chain with the
+ * same `Request` the middleware received. Calling `next(modifiedRequest)`
+ * passes a new `Request` down the chain, which is what makes retry,
+ * request-signing, and token-refresh middleware expressible without leaving
+ * the pipeline.
+ *
+ * Middleware MAY call `next` more than once (e.g. retry on a 5xx). Each
+ * call re-runs every downstream middleware *and* the final fetch — the
+ * dispatcher is recursive, not stateful.
+ *
+ * **Stream-body caveat:** if the original `request.body` is a stream, the
+ * stream is consumed by the first call. Retry middleware that may invoke
+ * `next` more than once should `request.clone()` between attempts.
  */
 export type Middleware = (
   request: Request,
-  next: () => Promise<Response>,
+  next: (request?: Request) => Promise<Response>,
 ) => Promise<Response>;
+
+// ---------------------------------------------------------------------------
+// Retry / timeout
+// ---------------------------------------------------------------------------
+
+/**
+ * Configuration for the `retry` middleware. Pass a number as a shorthand
+ * for `{ attempts: n }`.
+ */
+export interface RetryOptions {
+  /** Maximum number of attempts (including the first). Default: 3. */
+  attempts?: number;
+  /** Initial backoff delay in milliseconds. Default: 100. */
+  backoff?: number;
+  /** Backoff multiplier applied between attempts. Default: 2. */
+  factor?: number;
+  /** Maximum backoff delay in milliseconds. Default: 30_000. */
+  maxBackoff?: number;
+  /**
+   * HTTP status codes that should trigger a retry. Network rejections
+   * (the underlying fetch throwing) are always retried unless they were
+   * caused by the user's AbortSignal.
+   *
+   * Default: `[408, 425, 429, 500, 502, 503, 504]`
+   */
+  retryOn?: readonly number[];
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -164,6 +360,19 @@ export interface FetchConfig<R extends Routes = Routes> {
    * Cloudflare Workers, or test mocks. Defaults to `globalThis.fetch`.
    */
   fetch?: FetchFn;
+  /**
+   * If set, every request gets a per-attempt timeout (in milliseconds)
+   * via an auto-prepended `timeout()` middleware. Per-call `timeout`
+   * overrides this for individual requests.
+   */
+  timeout?: number;
+  /**
+   * If set, retryable failures (network errors, 408/425/429/5xx) are
+   * automatically retried via an auto-prepended `retry()` middleware.
+   * Pass a number as shorthand for `{ attempts: n }`. Per-call `retry`
+   * overrides this for individual requests.
+   */
+  retry?: number | RetryOptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,22 +445,61 @@ export type ResolveBody<
   : never;
 
 /**
+ * Resolves the response type for a single call when an ad-hoc
+ * `responseSchema` is supplied. If the call passes a schema, its inferred
+ * output wins; otherwise the type falls back to `FromRoute` (which is
+ * usually {@link ResolveResponse} for typed routes, or `unknown` for
+ * untyped paths).
+ */
+export type ResolveAdHocResponse<AdHoc, FromRoute>
+  = AdHoc extends StandardSchemaV1<unknown, infer T>
+    ? T
+    : FromRoute;
+
+/**
  * Call options for a typed fetch invocation. Intersects native `RequestInit`
  * with schema-driven `body`, `params`, and `query` fields. When the matched
  * route declares a `body` schema, `body` becomes required and typed; when
  * the path contains `{param}` placeholders, `params` becomes required.
+ *
+ * The optional `AdHoc` generic captures the per-call `responseSchema` so its
+ * inferred output flows through to the {@link TypedResponse} return type
+ * (see {@link ResolveAdHocResponse}). Defaults to `undefined`, in which
+ * case the route's declared `response` schema is used instead.
  */
 export type TypedFetchOptions<
   R extends Routes,
   P extends string,
   M extends string,
+  AdHoc extends StandardSchemaV1 | undefined = undefined,
 > = Omit<RequestInit, 'method' | 'body'> & {
   /** HTTP method for this call. Narrowed to keys of the route definition. */
   method: M;
   /** Per-call fetch override. Falls back to `FetchConfig.fetch`, then `globalThis.fetch`. */
   fetch?: FetchFn;
-  /** Ad-hoc response schema, used when no `response` is declared on the route. */
-  responseSchema?: Schema;
+  /**
+   * Per-call middleware override. Pass `false` to skip the configured chain
+   * entirely (e.g. for an auth-refresh endpoint that must not trigger the
+   * refresh middleware), or an array to replace it for this call only.
+   * When omitted, the chain configured via `FetchConfig.middleware` is used.
+   */
+  middleware?: Middleware[] | false;
+  /**
+   * Per-call timeout in milliseconds. Overrides `FetchConfig.timeout` for
+   * this request only.
+   */
+  timeout?: number;
+  /**
+   * Per-call retry configuration. Overrides `FetchConfig.retry` for this
+   * request only.
+   */
+  retry?: number | RetryOptions;
+  /**
+   * Ad-hoc response schema. When provided, its inferred output type drives
+   * the return type of `.result()` — overriding any `response` declared on
+   * the matched route.
+   */
+  responseSchema?: AdHoc;
 } & (ResolveBody<R, P, M> extends never
   ? { body?: unknown }
   : { body: ResolveBody<R, P, M> })
@@ -265,16 +513,49 @@ export type TypedFetchOptions<
 /**
  * Untyped fetch options accepted when the caller uses a path or method that
  * is not present in the `Routes` table — falls back to `unknown` body and
- * string-keyed params/query.
+ * string-keyed params/query. The `AdHoc` generic carries the optional
+ * per-call `responseSchema` for inference parity with {@link TypedFetchOptions}.
  */
-type UntypedFetchOptions = Omit<RequestInit, 'method' | 'body'> & {
+type UntypedFetchOptions<
+  AdHoc extends StandardSchemaV1 | undefined = undefined,
+> = Omit<RequestInit, 'method' | 'body'> & {
   method: string;
   body?: unknown;
   params?: Record<string, string>;
   query?: Record<string, string | number | boolean | undefined>;
   fetch?: FetchFn;
-  responseSchema?: Schema;
+  middleware?: Middleware[] | false;
+  timeout?: number;
+  retry?: number | RetryOptions;
+  responseSchema?: AdHoc;
 };
+
+/**
+ * Per-method shortcut type used by {@link TypedFetchFn}'s `.get`, `.post`,
+ * etc. Mirrors {@link TypedFetchFn} but pins the HTTP method `M` and omits
+ * the `method` field from the options object — so callers write
+ * `f.get('/users')` instead of `f('/users', { method: 'GET' })`.
+ */
+export type MethodShortcutFn<R extends Routes, M extends HttpMethod> = <
+  P extends (keyof R & string) | (string & {}),
+  AdHoc extends StandardSchemaV1 | undefined = undefined,
+>(
+  path: P,
+  options?: P extends keyof R
+    ? M extends keyof R[P] & string
+      ? Omit<TypedFetchOptions<R, P, M, AdHoc>, 'method'>
+      : Omit<UntypedFetchOptions<AdHoc>, 'method'>
+    : Omit<UntypedFetchOptions<AdHoc>, 'method'>,
+) => Promise<
+  P extends keyof R
+    ? M extends keyof R[P] & string
+      ? TypedResponse<
+        ResolveAdHocResponse<AdHoc, ResolveResponse<R, P, M>>,
+        ResolveErrorResponse<R, P, M>
+      >
+      : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+    : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+>;
 
 /**
  * The typed fetch function returned by {@link createFetch}. Shape mirrors
@@ -282,23 +563,82 @@ type UntypedFetchOptions = Omit<RequestInit, 'method' | 'body'> & {
  * with method/path autocomplete from the `Routes` table, a typed `body`
  * parameter, and a {@link TypedResponse} return type with a typed
  * `.result()` method.
+ *
+ * The third inner generic (`AdHoc`) is inferred from the call's optional
+ * `responseSchema` field; when supplied, its output type takes precedence
+ * over the route's declared `response` schema.
+ *
+ * Also exposes:
+ * - {@link MethodShortcutFn | per-method shortcuts} (`.get`, `.post`, ...)
+ * - `.with(overrides)` — fork this client with config overrides applied
  */
-export type TypedFetchFn<R extends Routes> = <
-  P extends (keyof R & string) | (string & {}),
-  M extends P extends keyof R
-    ? (keyof R[P] & string) | (string & {})
-    : string,
->(
-  path: P,
-  options: P extends keyof R
-    ? M extends keyof R[P] & string
-      ? TypedFetchOptions<R, P, M>
-      : UntypedFetchOptions
-    : UntypedFetchOptions,
-) => Promise<
-  P extends keyof R
-    ? M extends keyof R[P] & string
-      ? TypedResponse<ResolveResponse<R, P, M>, ResolveErrorResponse<R, P, M>>
-      : TypedResponse
-    : TypedResponse
->;
+export interface TypedFetchFn<R extends Routes> {
+  <
+    P extends (keyof R & string) | (string & {}),
+    M extends P extends keyof R
+      ? (keyof R[P] & string) | (string & {})
+      : string,
+    AdHoc extends StandardSchemaV1 | undefined = undefined,
+  >(
+    path: P,
+    options: P extends keyof R
+      ? M extends keyof R[P] & string
+        ? TypedFetchOptions<R, P, M, AdHoc>
+        : UntypedFetchOptions<AdHoc>
+      : UntypedFetchOptions<AdHoc>,
+  ): Promise<
+    P extends keyof R
+      ? M extends keyof R[P] & string
+        ? TypedResponse<
+          ResolveAdHocResponse<AdHoc, ResolveResponse<R, P, M>>,
+          ResolveErrorResponse<R, P, M>
+        >
+        : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+      : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+  >;
+
+  /**
+   * Forks this typed fetch into a sibling that inherits everything from
+   * the parent's config except the supplied `overrides`. Useful for
+   * deriving an auth-free client for the login/refresh endpoints from a
+   * parent that has an auth middleware installed:
+   *
+   * ```typescript
+   * const api = createFetch({ baseUrl, middleware: [authBearer(...)] });
+   * const noAuth = api.with({ middleware: [] });
+   * ```
+   *
+   * **The merge is shallow.** Arrays do NOT concatenate — passing
+   * `{ middleware: [extra] }` REPLACES the parent's middleware chain
+   * entirely with `[extra]`. To extend the parent's chain, spread it
+   * yourself in the override:
+   *
+   * ```typescript
+   * const parentMiddleware = [authBearer(getToken), retry(3)];
+   * const api = createFetch({ baseUrl, middleware: parentMiddleware });
+   *
+   * // Append a logging middleware to the parent's chain
+   * const noisy = api.with({
+   *   middleware: [...parentMiddleware, async (req, next) => {
+   *     console.log(req.method, req.url);
+   *     return next(req);
+   *   }],
+   * });
+   * ```
+   *
+   * The parent is unaffected — `with` returns a brand-new function over a
+   * shallow-merged config.
+   */
+  with: (overrides: Partial<FetchConfig<R>>) => TypedFetchFn<R>;
+
+  /** Method shortcut: `f.get(path, opts?)` ≡ `f(path, { ...opts, method: 'GET' })` */
+  get: MethodShortcutFn<R, 'GET'>;
+  /** Method shortcut: `f.post(path, opts?)` ≡ `f(path, { ...opts, method: 'POST' })` */
+  post: MethodShortcutFn<R, 'POST'>;
+  /** Method shortcut: `f.put(path, opts?)` ≡ `f(path, { ...opts, method: 'PUT' })` */
+  put: MethodShortcutFn<R, 'PUT'>;
+  /** Method shortcut: `f.delete(path, opts?)` ≡ `f(path, { ...opts, method: 'DELETE' })` */
+  delete: MethodShortcutFn<R, 'DELETE'>;
+  /** Method shortcut: `f.patch(path, opts?)` ≡ `f(path, { ...opts, method: 'PATCH' })` */
+  patch: MethodShortcutFn<R, 'PATCH'>;
+}

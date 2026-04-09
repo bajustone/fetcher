@@ -11,7 +11,11 @@
  * @module
  */
 
-import type { Schema } from './types.ts';
+import type {
+  StandardSchemaV1,
+  StandardSchemaV1Issue,
+  StandardSchemaV1Result,
+} from './types.ts';
 
 /**
  * A JSON Schema node. Only the fields this validator understands are declared
@@ -60,8 +64,9 @@ export class ValidationError extends Error {
 
 /**
  * Validates data against a {@link JSONSchemaDefinition}. Implements the
- * universal {@link Schema} interface, so instances can be dropped anywhere
- * `@bajustone/fetcher` expects a schema.
+ * Standard Schema V1 contract via the `~standard` property, so instances
+ * can be dropped anywhere `@bajustone/fetcher` (or any Standard-Schema-aware
+ * library) expects a schema.
  *
  * @example
  * ```typescript
@@ -71,20 +76,63 @@ export class ValidationError extends Error {
  *   required: ['id'],
  * });
  *
+ * // Standard Schema V1 (preferred)
+ * const result = await validator['~standard'].validate({ id: '42' });
+ * if (result.issues) {
+ *   // handle issues
+ * } else {
+ *   // result.value is { id: string }
+ * }
+ *
+ * // Legacy parse() — deprecated, will be removed in a future minor.
  * validator.parse({ id: '42' }); // ok
  * validator.parse({}); // throws ValidationError
  * ```
  */
-export class JSONSchemaValidator<T = unknown> implements Schema<T> {
+export class JSONSchemaValidator<T = unknown> implements StandardSchemaV1<unknown, T> {
+  /**
+   * Standard Schema V1 contract. Use `validator['~standard'].validate(data)`
+   * to get a `{ value }` / `{ issues }` result without throwing.
+   */
+  readonly '~standard': StandardSchemaV1<unknown, T>['~standard'];
+
   constructor(
     private schema: JSONSchemaDefinition,
     private definitions: Record<string, JSONSchemaDefinition> = {},
-  ) {}
+  ) {
+    this['~standard'] = {
+      version: 1,
+      vendor: 'fetcher-json-schema',
+      validate: (value: unknown): StandardSchemaV1Result<T> => {
+        try {
+          this.validate(value, this.schema, []);
+          return { value: value as T };
+        }
+        catch (err) {
+          if (err instanceof ValidationError) {
+            const issue: StandardSchemaV1Issue = err.path.length > 0
+              ? { message: err.message, path: err.path }
+              : { message: err.message };
+            return { issues: [issue] };
+          }
+          // Unexpected error — surface as a single issue rather than throwing,
+          // so the spec contract holds.
+          return {
+            issues: [{ message: err instanceof Error ? err.message : String(err) }],
+          };
+        }
+      },
+    };
+  }
 
   /**
    * Validates `data` against the schema. Returns the input cast to `T` on
    * success, or throws a {@link ValidationError} pointing at the offending
    * field on failure.
+   *
+   * @deprecated Prefer `validator['~standard'].validate(data)`, which returns
+   * a Standard Schema V1 result without throwing. `parse()` will be removed
+   * in a future minor version.
    */
   parse(data: unknown): T {
     this.validate(data, this.schema, []);

@@ -7,36 +7,55 @@
  */
 
 import type { JSONSchemaDefinition } from './json-schema-validator.ts';
-import type { HttpMethod, RouteDefinition, Routes } from './types.ts';
+import type { HttpMethod, InferRoutesFromSpec, RouteDefinition, Routes } from './types.ts';
 import { JSONSchemaValidator } from './json-schema-validator.ts';
 
-interface OpenAPISpec {
-  openapi: string;
-  paths?: Record<string, Record<string, OpenAPIOperation>>;
+/**
+ * Loose OpenAPI 3.x spec shape — the public input type for {@link fromOpenAPI}.
+ *
+ * Uses `any` index signatures so that an `import spec from './openapi.json'`
+ * (which widens each object to include its literal `description`/`summary`/
+ * etc. fields) satisfies the type without a cast. The internal parser uses
+ * the tighter {@link OpenAPIOperation} / {@link OpenAPIParameter} shapes
+ * below — the boundary cast happens at the iteration site in `fromOpenAPI`.
+ *
+ * Only `paths` and `components.schemas` are named; everything else is
+ * permitted via index signatures.
+ */
+export interface OpenAPISpec {
+  openapi?: string;
+  /**
+   * Map of URL paths to path-item objects. The value type is `any` (rather
+   * than a closed shape) so that JSON-imported specs with extra fields like
+   * `summary`/`description` on path items satisfy the constraint.
+   */
+  paths?: { [path: string]: any };
   components?: {
-    schemas?: Record<string, JSONSchemaDefinition>;
+    schemas?: { [name: string]: JSONSchemaDefinition };
+    [key: string]: any;
   };
+  [key: string]: any;
 }
 
+/**
+ * Internal narrowed shape for an OpenAPI operation. Only the fields this
+ * adapter reads are named; the parser is defensive about missing/extra
+ * fields via optional chaining.
+ */
 interface OpenAPIOperation {
   requestBody?: {
-    content?: Record<
-      string,
-      { schema?: JSONSchemaDefinition }
-    >;
+    content?: Record<string, { schema?: JSONSchemaDefinition }>;
   };
   responses?: Record<
     string,
-    {
-      content?: Record<
-        string,
-        { schema?: JSONSchemaDefinition }
-      >;
-    }
+    { content?: Record<string, { schema?: JSONSchemaDefinition }> }
   >;
   parameters?: OpenAPIParameter[];
 }
 
+/**
+ * Internal narrowed shape for an OpenAPI parameter object.
+ */
 interface OpenAPIParameter {
   name: string;
   in: 'path' | 'query' | 'header' | 'cookie';
@@ -57,26 +76,52 @@ const HTTP_METHODS: Set<string> = new Set([
  * JSON Schema validators. One JSON spec gives you type safety + runtime
  * validation with zero external dependencies.
  *
+ * Generic over the literal spec type: when called with an `as const` JSON
+ * import (or any literal-typed object), the return type is narrowed to the
+ * spec's actual paths and methods via {@link InferRoutesFromSpec}, so
+ * downstream `createFetch({ routes: fromOpenAPI(spec) })` calls get path
+ * autocomplete and method narrowing for free.
+ *
+ * Body/response type inference from the spec's JSON Schemas is a follow-up
+ * (see the {@link InferRoutesFromSpec} JSDoc); the runtime validators are
+ * still active either way.
+ *
  * ```typescript
  * import spec from './openapi.json'
- * const routes = fromOpenAPI(spec)
- * const f = createFetch({ baseUrl: '...', routes })
+ * const f = createFetch({
+ *   baseUrl: '...',
+ *   routes: fromOpenAPI(spec),
+ * })
+ *
+ * f('/pets/{petId}', { method: 'GET', params: { petId: '42' } })
+ * //  ^ autocompletes from spec               ^ inferred from path template
  * ```
  */
-export function fromOpenAPI(spec: OpenAPISpec): Routes {
+export function fromOpenAPI<const Spec extends OpenAPISpec>(
+  spec: Spec,
+): InferRoutesFromSpec<Spec> {
   const definitions = buildDefinitions(spec);
   const routes: Routes = {};
 
   if (!spec.paths)
-    return routes;
+    return routes as InferRoutesFromSpec<Spec>;
 
   for (const [path, pathItem] of Object.entries(spec.paths)) {
+    if (!pathItem || typeof pathItem !== 'object')
+      continue;
+
     const methodDefs: Partial<Record<HttpMethod, RouteDefinition>> = {};
 
-    for (const [method, operation] of Object.entries(pathItem)) {
+    for (const [method, rawOperation] of Object.entries(pathItem as Record<string, unknown>)) {
       if (!HTTP_METHODS.has(method))
         continue;
+      if (!rawOperation || typeof rawOperation !== 'object')
+        continue;
 
+      // Boundary cast: the public OpenAPISpec input is loose so JSON
+      // imports satisfy it; from here on we work with the tight internal
+      // OpenAPIOperation shape that the parsing helpers expect.
+      const operation = rawOperation as OpenAPIOperation;
       const routeDef: RouteDefinition = {};
 
       // Request body schema
@@ -122,7 +167,9 @@ export function fromOpenAPI(spec: OpenAPISpec): Routes {
     }
   }
 
-  return routes;
+  // The runtime can't statically verify the literal mapping computed by
+  // InferRoutesFromSpec — that's a compile-time-only narrowing. Cast through.
+  return routes as InferRoutesFromSpec<Spec>;
 }
 
 /** Build a flat definitions map for $ref resolution */
