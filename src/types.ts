@@ -168,26 +168,61 @@ export interface TypedResponse<T = unknown, HttpErrorBody = unknown> extends Res
 }
 
 /**
- * The promise returned by {@link TypedFetchFn} and its method shortcuts.
- * Extends the native `Promise<TypedResponse>` with a `.result()` shorthand
- * so callers can collapse two awaits into one:
+ * Describes a cache-friendly query derived from a typed fetch call.
+ * The `key` is deterministic (same path + method + params + query →
+ * same key) and the `fn` calls `.unwrap()` internally — compatible
+ * with TanStack Query, SWR, Pinia Colada, or any cache that accepts
+ * a key + async function.
  *
  * ```typescript
- * // Before (still works):
- * const response = await f.get('/pets');
- * const result = await response.result();
+ * const { key, fn } = api.get('/users', { query: { page: 1 } }).query();
+ * // key: ['GET', '/users', { page: 1 }]
+ * // fn:  () => Promise<User[]>
  *
- * // After:
- * const result = await f.get('/pets').result();
+ * useQuery({ queryKey: key, queryFn: fn });  // TanStack Query
+ * useSWR(key, fn);                           // SWR
  * ```
+ */
+export interface QueryDescriptor<T> {
+  readonly key: ReadonlyArray<string | Record<string, unknown>>;
+  readonly fn: () => Promise<T>;
+}
+
+/**
+ * The promise returned by {@link TypedFetchFn} and its method shortcuts.
+ * Extends the native `Promise<TypedResponse>` with three shorthands:
  *
- * `.result()` on the promise is equivalent to `.then(r => r.result())` —
- * it resolves to the same {@link ResultData} discriminated union.
+ * - `.result()` — resolves to `ResultData<T>` (never throws)
+ * - `.unwrap()` — resolves to `T` directly, throws `FetcherRequestError` on failure
+ * - `.query()` — returns `{ key, fn }` for cache libraries (synchronous, does not fetch)
+ *
+ * ```typescript
+ * // Safe — discriminated union, never throws:
+ * const result = await f.get('/pets').result();
+ *
+ * // Throwing — for load functions, server actions, remote functions:
+ * const pets = await f.get('/pets').unwrap();
+ *
+ * // Cache-friendly — for TanStack Query, SWR, etc.:
+ * const { key, fn } = f.get('/pets').query();
+ * ```
  */
 export type TypedFetchPromise<T = unknown, HttpErrorBody = unknown>
   = Promise<TypedResponse<T, HttpErrorBody>> & {
     /** Shorthand: resolves directly to `ResultData<T, HttpErrorBody>`. */
     result: () => Promise<ResultData<T, HttpErrorBody>>;
+    /**
+     * Returns the data on success, throws {@link FetcherRequestError} on
+     * failure. Use in server-side contexts (load functions, remote functions,
+     * server actions) where framework error boundaries catch thrown errors.
+     */
+    unwrap: () => Promise<T>;
+    /**
+     * Returns a {@link QueryDescriptor} with a deterministic cache `key`
+     * and an async `fn` that calls `.unwrap()`. Does not trigger the fetch —
+     * the fetch runs when `fn()` is called by the caching library.
+     */
+    query: () => QueryDescriptor<T>;
   };
 
 // ---------------------------------------------------------------------------

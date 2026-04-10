@@ -273,6 +273,75 @@ if (!result.ok) {
 }
 ```
 
+### `.unwrap()` — throwing alternative for server-side code
+
+`.unwrap()` returns `data` directly on success, or throws a `FetcherRequestError` on failure. Use it in server-side contexts where framework error boundaries catch thrown errors:
+
+```typescript
+// SvelteKit load function
+export const load: PageServerLoad = async ({ fetch }) => {
+  const users = await f.get('/users', { fetch }).unwrap();
+  return { users }; // typed, no if-not-ok boilerplate
+};
+
+// SvelteKit remote function
+export const getUsers = query(async () => {
+  return f.get('/users').unwrap();
+});
+
+// Next.js server component
+async function UsersPage() {
+  const users = await f.get('/users').unwrap();
+  return <UserList users={users} />;
+}
+```
+
+`FetcherRequestError` extends `Error` and carries `.status` (HTTP code or 500) and `.fetcherError` (the full discriminated union):
+
+```typescript
+try {
+  await f.get('/users').unwrap();
+} catch (err) {
+  if (err instanceof FetcherRequestError) {
+    err.status;        // 404, 500, etc.
+    err.fetcherError;  // { kind: 'http', status: 404, body: ... }
+  }
+}
+```
+
+### `.query()` — cache-friendly descriptor for TanStack Query, SWR, etc.
+
+`.query()` returns `{ key, fn }` — a deterministic cache key and an async function that calls `.unwrap()`. Does not trigger the fetch; the caching library calls `fn()` when it needs data:
+
+```typescript
+import { createQuery } from '@tanstack/svelte-query'; // or react-query, vue-query
+
+const { key, fn } = f.get('/users', { query: { page: 1 } }).query();
+// key: ['GET', '/users', { page: 1 }]
+// fn:  () => Promise<User[]>
+
+// TanStack Query
+const users = createQuery({ queryKey: key, queryFn: fn });
+
+// SWR
+const { data } = useSWR(key, fn);
+```
+
+Use `.query()` for optimistic updates — the key identifies the cache entry:
+
+```typescript
+const { key: usersKey } = f.get('/users').query();
+queryClient.setQueryData(usersKey, (old) => [...old, optimisticUser]);
+```
+
+### When to use which
+
+| Method | Returns | Throws? | Use when |
+|--------|---------|---------|----------|
+| `.result()` | `{ ok, data } \| { ok, error }` | Never | Partial success, custom error handling |
+| `.unwrap()` | `data` | `FetcherRequestError` | Load functions, remote functions, server actions |
+| `.query()` | `{ key, fn }` | `fn()` throws | TanStack Query, SWR, any caching library |
+
 ## Middleware
 
 ```typescript
@@ -355,6 +424,7 @@ export async function load({ fetch }) {
 |---|---|
 | `createFetch(config)` | Factory returning a typed fetch function. Optional `<paths>` generic for OpenAPI type inference. |
 | `extractErrorMessage(error)` | Turns a `FetcherError` into a human-readable string. Handles all three error kinds. |
+| `FetcherRequestError` | Error class thrown by `.unwrap()`. Carries `.status`, `.fetcherError`, and `.message`. |
 | `fromOpenAPI(spec)` | Converts an OpenAPI 3.x spec into routes with runtime validators. |
 | `lintSpec(spec)` | Walks an OpenAPI 3.x spec; returns every keyword the runtime validator doesn't enforce. |
 | `coverage(spec)` | Walks an OpenAPI 3.x spec; reports per-route schema complexity (`oneOf`/`allOf`/recursive `$ref`/etc.). |
@@ -373,7 +443,7 @@ export async function load({ fetch }) {
 
 ### Types
 
-`TypedFetchFn`, `TypedFetchPromise`, `TypedResponse`, `ResultData`, `FetcherError`, `FetcherErrorLocation`, `FetchConfig`, `Middleware`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `SchemaOf`, `StandardSchemaV1`, `BearerWithRefreshOptions<Paths>`, `FetcherPluginOptions`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, `InferRoutesFromSpec`, `InferOutput`.
+`TypedFetchFn`, `TypedFetchPromise`, `TypedResponse`, `ResultData`, `QueryDescriptor`, `FetcherError`, `FetcherErrorLocation`, `FetchConfig`, `Middleware`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `SchemaOf`, `StandardSchemaV1`, `BearerWithRefreshOptions<Paths>`, `FetcherPluginOptions`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, `InferRoutesFromSpec`, `InferOutput`.
 
 See [`docs/architecture.md`](./docs/architecture.md) for implementation details.
 

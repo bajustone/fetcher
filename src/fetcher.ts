@@ -249,13 +249,28 @@ export function createFetch<
     return wrapResponse(response, responseSchema, errorResponseSchema);
   };
 
-  // Wrap rawFetchFn so every returned promise has a `.result()` shorthand.
-  // This lets callers write `await f.get('/path').result()` instead of the
-  // two-await `const r = await f.get('/path'); await r.result()`.
+  // Wrap rawFetchFn so every returned promise has `.result()`, `.unwrap()`,
+  // and `.query()` shorthands.
   const fetchFn = (path: string, options: Record<string, unknown> = {}): any => {
     const promise = rawFetchFn(path, options);
+    const resultFn = (): Promise<ResultData<unknown>> => promise.then((r: TypedResponse) => r.result());
+    const unwrapFn = (): Promise<unknown> => resultFn().then((r) => {
+      if (r.ok)
+        return r.data;
+      throw new FetcherRequestError(r.error);
+    });
     return Object.assign(promise, {
-      result: () => promise.then((r: TypedResponse) => r.result()),
+      result: resultFn,
+      unwrap: unwrapFn,
+      query: () => ({
+        key: buildQueryKey(
+          (options.method as string) ?? 'GET',
+          path,
+          options.params as Record<string, string> | undefined,
+          options.query as Record<string, unknown> | undefined,
+        ),
+        fn: () => unwrapFn(),
+      }),
     });
   };
 
@@ -426,6 +441,65 @@ function interpolatePath(
     }
     return encodeURIComponent(value);
   });
+}
+
+/**
+ * Builds a deterministic cache key from the call arguments. The key format
+ * is `[method, path, params?, query?]` — compatible with TanStack Query's
+ * array keys and serializable for SWR's string keys.
+ */
+function buildQueryKey(
+  method: string,
+  path: string,
+  params?: Record<string, string>,
+  query?: Record<string, unknown>,
+): ReadonlyArray<string | Record<string, unknown>> {
+  const key: Array<string | Record<string, unknown>> = [method, path];
+  if (params && Object.keys(params).length > 0)
+    key.push(params);
+  if (query) {
+    const filtered: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== null)
+        filtered[k] = v;
+    }
+    if (Object.keys(filtered).length > 0)
+      key.push(filtered);
+  }
+  return key;
+}
+
+/**
+ * Error thrown by {@link TypedFetchPromise.unwrap} when the result is not ok.
+ * Carries the full {@link FetcherError} discriminated union plus a derived
+ * HTTP `status` code so framework error boundaries can map it directly.
+ *
+ * - `kind: 'http'` → `status` is the HTTP status code (4xx/5xx)
+ * - `kind: 'network'` or `'validation'` → `status` is `500`
+ *
+ * Works with `instanceof` in catch blocks across all frameworks:
+ *
+ * ```typescript
+ * try {
+ *   const data = await api.get('/users').unwrap();
+ * } catch (err) {
+ *   if (err instanceof FetcherRequestError) {
+ *     err.status;        // number
+ *     err.fetcherError;  // FetcherError — full discriminated union
+ *   }
+ * }
+ * ```
+ */
+export class FetcherRequestError extends Error {
+  readonly fetcherError: FetcherError;
+  readonly status: number;
+
+  constructor(error: FetcherError) {
+    super(extractErrorMessage(error));
+    this.name = 'FetcherRequestError';
+    this.fetcherError = error;
+    this.status = error.kind === 'http' ? error.status : 500;
+  }
 }
 
 /**

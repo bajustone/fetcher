@@ -1,6 +1,6 @@
 import type { FetcherError, FetchFn, Schema } from '../src/types.ts';
 import { describe, expect, it } from 'bun:test';
-import { createFetch, extractErrorMessage } from '../src/fetcher.ts';
+import { createFetch, extractErrorMessage, FetcherRequestError } from '../src/fetcher.ts';
 import { authBearer } from '../src/middleware.ts';
 
 /** Helper to create a mock fetch that returns a JSON response */
@@ -1082,5 +1082,189 @@ describe('extractErrorMessage', () => {
       body: { code: 'INTERNAL' },
     };
     expect(extractErrorMessage(error)).toBe('HTTP 500');
+  });
+});
+
+describe('.unwrap()', () => {
+  it('returns data on success', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({ id: 1, name: 'Alice' }),
+    });
+    const data = await f.get('/users').unwrap();
+    expect(data).toEqual({ id: 1, name: 'Alice' });
+  });
+
+  it('throws FetcherRequestError on HTTP error', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({ message: 'Not found' }, 404),
+    });
+    try {
+      await f.get('/users/999').unwrap();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(FetcherRequestError);
+      expect(err).toBeInstanceOf(Error);
+      const e = err as FetcherRequestError;
+      expect(e.status).toBe(404);
+      expect(e.message).toBe('Not found');
+      expect(e.fetcherError.kind).toBe('http');
+    }
+  });
+
+  it('throws FetcherRequestError with status 500 on network error', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: async () => { throw new Error('Connection refused'); },
+    });
+    try {
+      await f.get('/users').unwrap();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(FetcherRequestError);
+      const e = err as FetcherRequestError;
+      expect(e.status).toBe(500);
+      expect(e.message).toBe('Connection refused');
+      expect(e.fetcherError.kind).toBe('network');
+    }
+  });
+
+  it('throws FetcherRequestError on validation error', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({ id: 'not-a-number' }),
+      routes: {
+        '/users': {
+          GET: {
+            response: schema((data) => {
+              const obj = data as Record<string, unknown>;
+              if (typeof obj.id !== 'number')
+                throw new Error('id must be a number');
+              return obj;
+            }),
+          },
+        },
+      },
+    });
+    try {
+      await f.get('/users').unwrap();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(FetcherRequestError);
+      const e = err as FetcherRequestError;
+      expect(e.status).toBe(500);
+      expect(e.fetcherError.kind).toBe('validation');
+    }
+  });
+
+  it('preserves the full FetcherError in .fetcherError', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({ error: { message: 'Forbidden' } }, 403),
+    });
+    try {
+      await f.get('/admin').unwrap();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      const e = err as FetcherRequestError;
+      expect(e.fetcherError).toEqual({
+        kind: 'http',
+        status: 403,
+        body: { error: { message: 'Forbidden' } },
+      });
+    }
+  });
+});
+
+describe('.query()', () => {
+  it('returns { key, fn } object', () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch([]),
+    });
+    const descriptor = f.get('/users').query();
+    expect(descriptor).toHaveProperty('key');
+    expect(descriptor).toHaveProperty('fn');
+    expect(Array.isArray(descriptor.key)).toBe(true);
+    expect(typeof descriptor.fn).toBe('function');
+  });
+
+  it('key includes method and path', () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch([]),
+    });
+    const { key } = f.get('/users').query();
+    expect(key).toEqual(['GET', '/users']);
+  });
+
+  it('key includes params when present', () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({}),
+    });
+    const { key } = f.get('/users/{id}', { params: { id: '42' } }).query();
+    expect(key).toEqual(['GET', '/users/{id}', { id: '42' }]);
+  });
+
+  it('key includes query when present', () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch([]),
+    });
+    const { key } = f.get('/users', { query: { page: 1, limit: 25 } }).query();
+    expect(key).toEqual(['GET', '/users', { page: 1, limit: 25 }]);
+  });
+
+  it('key excludes undefined and null query values', () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch([]),
+    });
+    const { key } = f.get('/users', {
+      query: { page: 1, filter: undefined, sort: undefined },
+    }).query();
+    expect(key).toEqual(['GET', '/users', { page: 1 }]);
+  });
+
+  it('fn() returns data on success', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch([{ id: 1 }]),
+    });
+    const { fn } = f.get('/users').query();
+    const data = await fn();
+    expect(data).toEqual([{ id: 1 }]);
+  });
+
+  it('fn() throws FetcherRequestError on failure', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({ message: 'Unauthorized' }, 401),
+    });
+    const { fn } = f.get('/users').query();
+    try {
+      await fn();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(FetcherRequestError);
+      expect((err as FetcherRequestError).status).toBe(401);
+    }
+  });
+
+  it('key includes method from shortcut', () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({}),
+    });
+    const { key } = f.post('/users', { body: {} }).query();
+    expect(key[0]).toBe('POST');
+    expect(key[1]).toBe('/users');
   });
 });

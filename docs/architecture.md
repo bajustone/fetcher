@@ -163,8 +163,9 @@ src/
 ### types.ts
 - `Schema<T>` — aliases `StandardSchemaV1<unknown, T>`.
 - `TypedResponse<T, E>` — `Response` + `.result()`.
-- `TypedFetchPromise<T, E>` — `Promise<TypedResponse<T, E>>` + `.result()` shorthand on the promise itself. Enables `await f.get('/path').result()`.
+- `TypedFetchPromise<T, E>` — `Promise<TypedResponse<T, E>>` + `.result()`, `.unwrap()`, and `.query()` shorthands on the promise itself.
 - `ResultData<T, E>` — discriminated union returned by `.result()`.
+- `QueryDescriptor<T>` — `{ key: ReadonlyArray<...>, fn: () => Promise<T> }` returned by `.query()`.
 - `RouteDefinition` — per-method schema config (body, params, query, response, errorResponse).
 - `Routes` — path → method → RouteDefinition mapping.
 - `SchemaOf<Components, Name>` — extracts a named schema from an `openapi-typescript`-generated `components` interface.
@@ -175,10 +176,22 @@ src/
 ### fetcher.ts
 - `createFetch<OAS, R>(config)` — factory returning a `TypedFetchFn<R, OAS>`.
 - `rawFetchFn` — async function handling path interpolation, query params, body serialization, middleware chain execution, and response wrapping.
-- `fetchFn` — wraps `rawFetchFn` to attach `.result()` on the returned promise (producing a `TypedFetchPromise`).
+- `fetchFn` — wraps `rawFetchFn` to attach `.result()`, `.unwrap()`, and `.query()` on the returned promise (producing a `TypedFetchPromise`).
 - Method shortcuts (`.get`, `.post`, `.put`, `.delete`, `.patch`) delegate to `fetchFn`.
 - `.with(overrides)` — forks the client with shallow-merged config, preserving both `R` and `OAS` generics.
+- `FetcherRequestError` — `Error` subclass thrown by `.unwrap()`. Carries `.status` (HTTP code or 500 for network/validation errors) and `.fetcherError` (the full `FetcherError` discriminated union). Enables `instanceof` checking in catch blocks.
 - `extractErrorMessage(error)` — standalone utility that extracts a human-readable string from any `FetcherError`. Handles all three error kinds: network (unwraps `cause`), validation (joins issue messages), http (extracts `body.message` or `body.error.message`, falls back to `HTTP {status}`).
+- `buildQueryKey(method, path, params?, query?)` — internal helper that produces a deterministic cache key array from call arguments. Used by `.query()`.
+
+#### Three promise-level shorthands
+
+| Method | Returns | Throws? | Use case |
+|--------|---------|---------|----------|
+| `.result()` | `ResultData<T>` | Never | Fine-grained error handling, partial success |
+| `.unwrap()` | `T` | `FetcherRequestError` | Server load functions, remote functions, server actions |
+| `.query()` | `QueryDescriptor<T>` | `fn()` throws | TanStack Query, SWR, Pinia Colada, any `{ key, fn }` cache |
+
+`.query()` is synchronous — it returns the key and function without triggering the fetch. The key is `[method, path, params?, query?]`, deterministic and compatible with TanStack Query's array keys.
 
 ### json-schema-validator.ts
 - Lightweight JSON Schema validator implementing **Standard Schema V1** via the `~standard` property.
