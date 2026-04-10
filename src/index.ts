@@ -64,18 +64,40 @@ export type { BearerWithRefreshOptions } from './middleware.ts';
 
 export { fromOpenAPI } from './openapi.ts';
 
+export { coverage, lintSpec } from './spec-tools.ts';
 export type {
+  RouteCoverage,
+  SpecCoverageReport,
+  SpecDriftIssue,
+} from './spec-tools.ts';
+
+export type {
+  AvailableMethods,
+  AvailablePaths,
   ExtractPathParams,
   FetchConfig,
   FetcherError,
   FetcherErrorLocation,
   FetchFn,
+  FilterKeys,
   HttpMethod,
   InferOutput,
   InferRoutesFromSpec,
   InferSchema,
+  IsTypedCall,
+  MediaType,
   MethodShortcutFn,
   Middleware,
+  OpenAPIErrorStatus,
+  OpenAPILowercaseMethod,
+  OpenAPIPaths,
+  OpenAPISuccessStatus,
+  ResolveBodyFor,
+  ResolveBodyFromPaths,
+  ResolveErrorResponseFor,
+  ResolveErrorResponseFromPaths,
+  ResolveResponseFor,
+  ResolveResponseFromPaths,
   ResultData,
   RetryOptions,
   RouteDefinition,

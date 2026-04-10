@@ -47,9 +47,12 @@ import { executeMiddleware, retry, timeout } from './middleware.ts';
  * const { data, error } = await response.result()
  * ```
  */
-export function createFetch<R extends Routes = Routes>(
+export function createFetch<
+  OAS = unknown,
+  R extends Routes = Routes,
+>(
   config: FetchConfig<R>,
-): TypedFetchFn<R> {
+): TypedFetchFn<R, OAS> {
   const {
     baseUrl,
     routes,
@@ -247,13 +250,17 @@ export function createFetch<R extends Routes = Routes>(
   };
 
   // Cast to the rich interface; properties below are attached imperatively.
-  const typed = fetchFn as unknown as TypedFetchFn<R>;
+  // The OAS generic is a phantom — it carries the user-supplied `paths`
+  // interface (when present) through to call-site type inference, but has
+  // no runtime representation.
+  const typed = fetchFn as unknown as TypedFetchFn<R, OAS>;
 
   // §4.B4 — instance forking. `with(overrides)` returns a sibling client
   // that inherits this client's config and applies the overrides on top.
-  // The parent is unaffected.
-  typed.with = (overrides: Partial<FetchConfig<R>>): TypedFetchFn<R> =>
-    createFetch<R>({ ...config, ...overrides });
+  // The parent is unaffected. The OAS generic is propagated explicitly so
+  // forks preserve OpenAPI-paths-based type inference.
+  typed.with = (overrides: Partial<FetchConfig<R>>): TypedFetchFn<R, OAS> =>
+    createFetch<OAS, R>({ ...config, ...overrides });
 
   // §4.B3 — method shortcuts. Each is a thin wrapper that injects the
   // HTTP method and forwards to the canonical long-form call.

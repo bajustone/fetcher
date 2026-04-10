@@ -274,6 +274,207 @@ export type InferRoutesFromSpec<S>
     : Routes;
 
 // ---------------------------------------------------------------------------
+// OpenAPI paths inference (D6 — typed body/response from generated `paths`)
+//
+// These types let callers pass a `paths` interface produced by
+// `openapi-typescript` (or any equivalent codegen) as a second generic on
+// `createFetch`, and have body / response / errorResponse types flow through
+// to call sites without a runtime conversion. The runtime continues to
+// validate via `fromOpenAPI(spec)` — types and validation are decoupled.
+// ---------------------------------------------------------------------------
+
+/** Lowercase HTTP method keys as emitted by `openapi-typescript`. */
+export type OpenAPILowercaseMethod
+  = | 'get' | 'post' | 'put' | 'delete' | 'patch'
+    | 'options' | 'head' | 'trace';
+
+/**
+ * Documentation alias for the `paths` interface emitted by
+ * `openapi-typescript` — its actual structure is
+ * `{ [path]: { [lowercase method]: { parameters?, requestBody?, responses } } }`.
+ *
+ * **Important:** the {@link createFetch} `OAS` generic is intentionally
+ * unconstrained (defaults to `unknown`). openapi-typescript emits
+ * `interface paths { ... }` *without* an index signature, so any constraint
+ * shaped as `Record<string, ...>` rejects the very input we want to accept.
+ * The constraint-free generic accepts the interface as-is and the helper
+ * types ({@link AvailablePaths}, {@link IsTypedCall}, {@link ResolveBodyFor},
+ * etc.) defensively handle non-paths inputs by checking `keyof OAS` first.
+ */
+export type OpenAPIPaths = Record<
+  string,
+  Partial<Record<OpenAPILowercaseMethod, unknown>>
+>;
+
+/**
+ * For an object `Obj`, returns the union of values whose keys match
+ * `Matchers`. Mirrors the helper of the same name in
+ * `openapi-typescript-helpers` — used to walk a generated paths tree's
+ * status-code → `content` → media-type levels without hard-coding the keys.
+ */
+export type FilterKeys<Obj, Matchers> = Obj extends object
+  ? { [K in keyof Obj]: K extends Matchers ? Obj[K] : never }[keyof Obj]
+  : never;
+
+/** Matches any `${type}/${subtype}` media type literal (e.g. `application/json`). */
+export type MediaType = `${string}/${string}`;
+
+/**
+ * Status code keys that count as a success response. Numeric 2xx values
+ * matching openapi-typescript's emitted keys, plus the wildcard form spec
+ * authors sometimes write by hand. Note: `'default'` is intentionally NOT
+ * here — it's treated as an error catch-all by {@link OpenAPIErrorStatus},
+ * so an endpoint with `200 + default` resolves the success body to the
+ * 200 schema and the error body to the default schema (matching how most
+ * OpenAPI authors mean it).
+ */
+export type OpenAPISuccessStatus
+  = | 200 | 201 | 202 | 203 | 204 | 205 | 206
+    | '2XX' | '2xx';
+
+/**
+ * Status code keys that count as an error response — 4xx/5xx in numeric
+ * form (matching openapi-typescript output), the wildcard variants, and
+ * `'default'` (treated as the catch-all error case).
+ */
+export type OpenAPIErrorStatus
+  = | 400 | 401 | 402 | 403 | 404 | 405 | 406 | 407 | 408 | 409
+    | 410 | 411 | 412 | 413 | 414 | 415 | 416 | 417 | 418 | 422
+    | 425 | 426 | 428 | 429 | 431 | 451
+    | 500 | 501 | 502 | 503 | 504 | 505 | 506 | 507 | 508 | 510 | 511
+    | '4XX' | '5XX' | '4xx' | '5xx' | 'default';
+
+/**
+ * Operation lookup with case-folding from the uppercase `M` we get at the
+ * call site to the lowercase keys openapi-typescript emits.
+ */
+type OpenAPIOperation<P, Path extends string, M extends string>
+  = Path extends keyof P
+    ? Lowercase<M> extends keyof P[Path]
+      ? P[Path][Lowercase<M>]
+      : never
+    : never;
+
+/**
+ * Resolves the success response body type from a generated `paths` interface.
+ * Returns `never` when no path / method / 2xx response / JSON content match —
+ * the `never` signal lets {@link ResolveResponseFor} fall back to `unknown`.
+ */
+export type ResolveResponseFromPaths<P, Path extends string, M extends string>
+  = OpenAPIOperation<P, Path, M> extends { responses: infer Resp }
+    ? FilterKeys<Resp, OpenAPISuccessStatus> extends { content: infer Content }
+      ? FilterKeys<Content, MediaType>
+      : never
+    : never;
+
+/**
+ * Resolves the error response body type from a generated `paths` interface.
+ * Returns `never` when no error response is declared.
+ */
+export type ResolveErrorResponseFromPaths<P, Path extends string, M extends string>
+  = OpenAPIOperation<P, Path, M> extends { responses: infer Resp }
+    ? FilterKeys<Resp, OpenAPIErrorStatus> extends { content: infer Content }
+      ? FilterKeys<Content, MediaType>
+      : never
+    : never;
+
+/**
+ * Resolves the request body type from a generated `paths` interface.
+ * Returns `never` when no request body is declared, which causes `body`
+ * to become optional in {@link TypedFetchOptions}.
+ */
+export type ResolveBodyFromPaths<P, Path extends string, M extends string>
+  = OpenAPIOperation<P, Path, M> extends { requestBody: infer Body }
+    ? Body extends { content: infer Content }
+      ? FilterKeys<Content, MediaType>
+      : never
+    : never;
+
+/**
+ * True when `OAS` carries any path entries — i.e. the caller supplied a
+ * generated `paths` interface as the OAS generic on `createFetch`. Used as
+ * the switch between Routes-based and OAS-based inference.
+ */
+type HasPaths<OAS> = [keyof OAS] extends [never] ? false : true;
+
+/**
+ * Path-key constraint that prefers OAS keys when an OAS paths interface is
+ * supplied, otherwise uses the Routes table. The `(string & {})` tail
+ * preserves literal autocomplete while still accepting arbitrary strings.
+ */
+export type AvailablePaths<R extends Routes, OAS>
+  = HasPaths<OAS> extends true
+    ? (keyof OAS & string) | (string & {})
+    : (keyof R & string) | (string & {});
+
+/**
+ * Method-key constraint per path. With OAS supplied, the constraint is left
+ * as `string` so the call site can pass any uppercase method. Method
+ * autocomplete on OAS paths is intentionally not provided here — combining
+ * `Uppercase<...>` with the `(string & {})` literal-inference trick interacts
+ * badly with TypeScript's inference, collapsing `M` to `never` for methods
+ * not declared in the spec. The Routes branch retains the existing
+ * autocomplete behavior because it doesn't need a case-folding wrapper.
+ */
+export type AvailableMethods<R extends Routes, OAS, Path extends string>
+  = HasPaths<OAS> extends true
+    ? string
+    : Path extends keyof R
+      ? (keyof R[Path] & string) | (string & {})
+      : string;
+
+/**
+ * Returns `true` when the `path` × `method` pair is "known" — present in
+ * either the OAS paths interface (when supplied) or the Routes table
+ * (otherwise). Used to switch the call-site between
+ * {@link TypedFetchOptions} and `UntypedFetchOptions`.
+ */
+export type IsTypedCall<R extends Routes, OAS, P extends string, M extends string>
+  = HasPaths<OAS> extends true
+    ? P extends keyof OAS
+      ? Lowercase<M> extends keyof OAS[P]
+        ? true
+        : false
+      : false
+    : P extends keyof R
+      ? M extends keyof R[P] & string
+        ? true
+        : false
+      : false;
+
+/**
+ * Unified body resolver — prefers the OAS path when supplied, falls back
+ * to the Routes-based {@link ResolveBody}. Returns `never` when neither
+ * source declares a body, which makes the `body` field optional.
+ */
+export type ResolveBodyFor<R extends Routes, OAS, P extends string, M extends string>
+  = HasPaths<OAS> extends true
+    ? ResolveBodyFromPaths<OAS, P, M>
+    : ResolveBody<R, P, M>;
+
+/**
+ * Unified success-response resolver — prefers OAS, falls back to Routes,
+ * and finally to `unknown` if neither source has a typed response.
+ */
+export type ResolveResponseFor<R extends Routes, OAS, P extends string, M extends string>
+  = HasPaths<OAS> extends true
+    ? [ResolveResponseFromPaths<OAS, P, M>] extends [never]
+        ? unknown
+        : ResolveResponseFromPaths<OAS, P, M>
+    : ResolveResponse<R, P, M>;
+
+/**
+ * Unified error-response resolver — prefers OAS, falls back to Routes,
+ * and finally to `unknown`.
+ */
+export type ResolveErrorResponseFor<R extends Routes, OAS, P extends string, M extends string>
+  = HasPaths<OAS> extends true
+    ? [ResolveErrorResponseFromPaths<OAS, P, M>] extends [never]
+        ? unknown
+        : ResolveErrorResponseFromPaths<OAS, P, M>
+    : ResolveErrorResponse<R, P, M>;
+
+// ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
 
@@ -472,6 +673,7 @@ export type TypedFetchOptions<
   P extends string,
   M extends string,
   AdHoc extends StandardSchemaV1 | undefined = undefined,
+  OAS = unknown,
 > = Omit<RequestInit, 'method' | 'body'> & {
   /** HTTP method for this call. Narrowed to keys of the route definition. */
   method: M;
@@ -500,9 +702,9 @@ export type TypedFetchOptions<
    * the matched route.
    */
   responseSchema?: AdHoc;
-} & (ResolveBody<R, P, M> extends never
+} & (ResolveBodyFor<R, OAS, P, M> extends never
   ? { body?: unknown }
-  : { body: ResolveBody<R, P, M> })
+  : { body: ResolveBodyFor<R, OAS, P, M> })
 & ([ExtractPathParams<P>] extends [never]
   ? { params?: undefined }
   : { params: Record<ExtractPathParams<P>, string> }) & {
@@ -536,24 +738,24 @@ type UntypedFetchOptions<
  * the `method` field from the options object — so callers write
  * `f.get('/users')` instead of `f('/users', { method: 'GET' })`.
  */
-export type MethodShortcutFn<R extends Routes, M extends HttpMethod> = <
-  P extends (keyof R & string) | (string & {}),
+export type MethodShortcutFn<
+  R extends Routes,
+  M extends HttpMethod,
+  OAS = unknown,
+> = <
+  P extends AvailablePaths<R, OAS>,
   AdHoc extends StandardSchemaV1 | undefined = undefined,
 >(
   path: P,
-  options?: P extends keyof R
-    ? M extends keyof R[P] & string
-      ? Omit<TypedFetchOptions<R, P, M, AdHoc>, 'method'>
-      : Omit<UntypedFetchOptions<AdHoc>, 'method'>
+  options?: IsTypedCall<R, OAS, P, M> extends true
+    ? Omit<TypedFetchOptions<R, P, M, AdHoc, OAS>, 'method'>
     : Omit<UntypedFetchOptions<AdHoc>, 'method'>,
 ) => Promise<
-  P extends keyof R
-    ? M extends keyof R[P] & string
-      ? TypedResponse<
-        ResolveAdHocResponse<AdHoc, ResolveResponse<R, P, M>>,
-        ResolveErrorResponse<R, P, M>
-      >
-      : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+  IsTypedCall<R, OAS, P, M> extends true
+    ? TypedResponse<
+      ResolveAdHocResponse<AdHoc, ResolveResponseFor<R, OAS, P, M>>,
+      ResolveErrorResponseFor<R, OAS, P, M>
+    >
     : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
 >;
 
@@ -572,28 +774,22 @@ export type MethodShortcutFn<R extends Routes, M extends HttpMethod> = <
  * - {@link MethodShortcutFn | per-method shortcuts} (`.get`, `.post`, ...)
  * - `.with(overrides)` — fork this client with config overrides applied
  */
-export interface TypedFetchFn<R extends Routes> {
+export interface TypedFetchFn<R extends Routes, OAS = unknown> {
   <
-    P extends (keyof R & string) | (string & {}),
-    M extends P extends keyof R
-      ? (keyof R[P] & string) | (string & {})
-      : string,
+    P extends AvailablePaths<R, OAS>,
+    M extends AvailableMethods<R, OAS, P>,
     AdHoc extends StandardSchemaV1 | undefined = undefined,
   >(
     path: P,
-    options: P extends keyof R
-      ? M extends keyof R[P] & string
-        ? TypedFetchOptions<R, P, M, AdHoc>
-        : UntypedFetchOptions<AdHoc>
+    options: IsTypedCall<R, OAS, P, M> extends true
+      ? TypedFetchOptions<R, P, M, AdHoc, OAS>
       : UntypedFetchOptions<AdHoc>,
   ): Promise<
-    P extends keyof R
-      ? M extends keyof R[P] & string
-        ? TypedResponse<
-          ResolveAdHocResponse<AdHoc, ResolveResponse<R, P, M>>,
-          ResolveErrorResponse<R, P, M>
-        >
-        : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+    IsTypedCall<R, OAS, P, M> extends true
+      ? TypedResponse<
+        ResolveAdHocResponse<AdHoc, ResolveResponseFor<R, OAS, P, M>>,
+        ResolveErrorResponseFor<R, OAS, P, M>
+      >
       : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
   >;
 
@@ -629,16 +825,16 @@ export interface TypedFetchFn<R extends Routes> {
    * The parent is unaffected — `with` returns a brand-new function over a
    * shallow-merged config.
    */
-  with: (overrides: Partial<FetchConfig<R>>) => TypedFetchFn<R>;
+  with: (overrides: Partial<FetchConfig<R>>) => TypedFetchFn<R, OAS>;
 
   /** Method shortcut: `f.get(path, opts?)` ≡ `f(path, { ...opts, method: 'GET' })` */
-  get: MethodShortcutFn<R, 'GET'>;
+  get: MethodShortcutFn<R, 'GET', OAS>;
   /** Method shortcut: `f.post(path, opts?)` ≡ `f(path, { ...opts, method: 'POST' })` */
-  post: MethodShortcutFn<R, 'POST'>;
+  post: MethodShortcutFn<R, 'POST', OAS>;
   /** Method shortcut: `f.put(path, opts?)` ≡ `f(path, { ...opts, method: 'PUT' })` */
-  put: MethodShortcutFn<R, 'PUT'>;
+  put: MethodShortcutFn<R, 'PUT', OAS>;
   /** Method shortcut: `f.delete(path, opts?)` ≡ `f(path, { ...opts, method: 'DELETE' })` */
-  delete: MethodShortcutFn<R, 'DELETE'>;
+  delete: MethodShortcutFn<R, 'DELETE', OAS>;
   /** Method shortcut: `f.patch(path, opts?)` ≡ `f(path, { ...opts, method: 'PATCH' })` */
-  patch: MethodShortcutFn<R, 'PATCH'>;
+  patch: MethodShortcutFn<R, 'PATCH', OAS>;
 }

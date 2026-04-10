@@ -69,52 +69,97 @@ if (result.ok) {
 
 ### 1. OpenAPI
 
-> [!IMPORTANT]
-> **OpenAPI mode does not yet give you fully typed responses out of the box.**
-> What you DO get from `fromOpenAPI(spec)` today: path autocomplete, method narrowing, path-parameter inference, and runtime validation of body / params / query / response / errorResponse against the spec's JSON Schemas.
-> What you do NOT yet get: type-level body/response *types* derived from the spec — `data` and `error.body` come back as `unknown`. Layer a per-call `responseSchema` (see [Mode 3](#3-ad-hoc-per-call-schema)) to recover static types until type-level JSON Schema → TS conversion lands.
+Fully typed body / response / error inference from an OpenAPI 3.x spec, with runtime validation built in. Two pieces compose:
+
+1. **Runtime validators** — `fromOpenAPI(spec)` parses the spec at startup and builds JSON Schema validators for every route's body / params / query / response / errorResponse. Zero codegen step.
+2. **Type inference** — pass an `openapi-typescript`-generated `paths` interface as a generic to `createFetch<paths>(...)`. Body, response, and error types flow through to every call site, including `result.data` and `result.error.body`.
 
 ```typescript
+import type { paths } from './generated/petstore-paths';
 import { createFetch, fromOpenAPI } from '@bajustone/fetcher';
-import spec from './openapi.json';
+import spec from './openapi.json' with { type: 'json' };
 
-const f = createFetch({
+const f = createFetch<paths>({
   baseUrl: 'https://api.example.com',
   routes: fromOpenAPI(spec),
 });
 
-f('/pets/{petId}', { method: 'GET', params: { petId: '42' } });
-//  ^ autocompletes from spec               ^ inferred from path template
-```
+const res = await f('/pets/{petId}', { method: 'GET', params: { petId: '42' } });
+//  ^^^^^^^^^^^^^^                                   ^^^^^^^^^^^^^^^^^^^
+//   autocompletes from spec                          inferred from path template
 
-`fromOpenAPI()` parses an OpenAPI 3.x spec, resolves `$ref` pointers, and creates route definitions with built-in JSON Schema validators. The function is generic over the literal spec type, so path keys and method keys flow from the spec without a codegen step.
-
-**What's inferred from the spec today:**
-- Path keys (autocomplete)
-- Method keys per path
-- Path parameters (via the path template — `{petId}` makes `params: { petId: string }` required)
-- Runtime validation of body / params / query / response / errorResponse
-
-**Not yet inferred:**
-- Body and response *types* from the spec's JSON Schemas. `data` and `error.body` come back as `unknown` for now. Layer a per-call `responseSchema: zSchema` for typed access (see Mode 3) — the runtime validators built by `fromOpenAPI` are still active either way.
-
-```typescript
-import { z } from 'zod';
-
-// Recover static types via per-call responseSchema until full inference lands
-const Pet = z.object({ id: z.number(), name: z.string() });
-
-const res = await f.get('/pets/{petId}', {
-  params: { petId: '42' },
-  responseSchema: Pet,
-});
 const result = await res.result();
 if (result.ok) {
-  result.data; // typed: { id: number; name: string }
+  result.data.id;   // typed: number  — from the spec's Pet schema
+  result.data.name; // typed: string
+} else if (result.error.kind === 'http') {
+  result.error.body.message; // typed: string — from the spec's Error schema
 }
 ```
 
-See [`docs/architecture.md`](./docs/architecture.md) for the inference scope and the roadmap toward full body/response inference.
+#### Setup
+
+1. Install `openapi-typescript` as a dev dependency (it's only used at build time; fetcher itself ships zero runtime deps):
+
+   ```bash
+   bun add -d openapi-typescript
+   ```
+
+2. Add a script to your `package.json` so generated types stay in sync with the spec:
+
+   ```json
+   {
+     "scripts": {
+       "gen:api": "openapi-typescript ./openapi.json -o ./src/generated/petstore-paths.d.ts",
+       "predev": "bun run gen:api",
+       "prebuild": "bun run gen:api"
+     }
+   }
+   ```
+
+3. Optional: hide the `<paths>` generic behind a small wrapper file so call sites just `import { api }`:
+
+   ```typescript
+   // src/api.ts
+   import type { paths } from './generated/petstore-paths';
+   import { createFetch, fromOpenAPI } from '@bajustone/fetcher';
+   import spec from '../openapi.json' with { type: 'json' };
+
+   export const api = createFetch<paths>({
+     baseUrl: 'https://api.example.com',
+     routes: fromOpenAPI(spec),
+   });
+   ```
+
+   Then everywhere else: `import { api } from './api'` and call it like the example above. No generic-passing in user code.
+
+#### Why two derivations from one spec?
+
+Types and runtime validation are decoupled on purpose. Types come from `openapi-typescript` codegen so the type story doesn't depend on TypeScript's conditional-type performance budget. Runtime comes from `fromOpenAPI(spec)` so the runtime story doesn't depend on `openapi-typescript`'s release schedule. One source of truth (`openapi.json`), two derivations.
+
+#### Spec linting and complexity audit
+
+Two library functions help you keep the spec honest:
+
+- **`lintSpec(spec)`** flags every keyword the runtime `JSONSchemaValidator` does NOT enforce (e.g., `format: 'email'` types as `string` but runtime accepts non-emails). Run from CI to fail builds on silent drift.
+- **`coverage(spec)`** reports per-route which schema features your spec uses — `oneOf`, `allOf`, recursive `$ref`, and so on. Useful as a complexity audit ("how much of my surface area uses the harder JSON Schema features?") even though the `<paths>` flow already handles all of them. See `docs/architecture.md` → "Why no zero-codegen OpenAPI inference?" for the historical context behind this function.
+
+```typescript
+import { coverage, lintSpec } from '@bajustone/fetcher';
+import spec from './openapi.json' with { type: 'json' };
+
+const issues = lintSpec(spec);
+if (issues.length > 0) {
+  for (const i of issues)
+    console.error(`${i.severity}: ${i.pointer} — ${i.message}`);
+  process.exit(1);
+}
+
+const report = coverage(spec);
+console.log(`${report.summary.fullyTyped}/${report.summary.total} routes use only the simple subset`);
+```
+
+See [`docs/architecture.md`](./docs/architecture.md) for the validator-vs-type drift surface and the full hybrid workflow rationale.
 
 ### 2. Manual route schemas
 
@@ -318,8 +363,10 @@ Useful for SvelteKit's load `fetch`, Cloudflare Workers, or test mocks.
 
 | Export | Purpose |
 |---|---|
-| `createFetch(config)` | Factory returning a typed fetch function. |
+| `createFetch(config)` | Factory returning a typed fetch function. Optional `<paths>` generic for openapi-typescript inference. |
 | `fromOpenAPI(spec)` | Converts an OpenAPI 3.x spec into typed routes. Generic over the spec literal. |
+| `lintSpec(spec)` | Walks an OpenAPI 3.x spec; returns every keyword the runtime validator doesn't enforce. CI gate for type-vs-runtime drift. |
+| `coverage(spec)` | Walks an OpenAPI 3.x spec; reports per-route which schema features (`oneOf`/`allOf`/recursive `$ref`/etc.) each route uses. Complexity audit, not a precondition for any flow. |
 | `authBearer(getToken)` | Bearer-token middleware. |
 | `bearerWithRefresh(opts)` | Bearer auth + 401-refresh-retry middleware. |
 | `retry(opts)` | Retry middleware (number shorthand or `RetryOptions`). |
@@ -329,7 +376,7 @@ Useful for SvelteKit's load `fetch`, Cloudflare Workers, or test mocks.
 
 ### Types
 
-`FetchConfig`, `FetcherError`, `FetcherErrorLocation`, `Middleware`, `ResultData`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `StandardSchemaV1`, `TypedFetchFn`, `TypedResponse`, `BearerWithRefreshOptions`, `InferOutput`, `InferRoutesFromSpec`, plus a few helpers.
+`FetchConfig`, `FetcherError`, `FetcherErrorLocation`, `Middleware`, `ResultData`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `StandardSchemaV1`, `TypedFetchFn`, `TypedResponse`, `BearerWithRefreshOptions`, `InferOutput`, `InferRoutesFromSpec`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, plus the OpenAPI-paths inference helpers (`OpenAPIPaths`, `FilterKeys`, `MediaType`, `ResolveBodyFor`, `ResolveResponseFor`, `ResolveErrorResponseFor`, `IsTypedCall`, `AvailablePaths`, `AvailableMethods`).
 
 See [`docs/architecture.md`](./docs/architecture.md) for implementation details.
 
