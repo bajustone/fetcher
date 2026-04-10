@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.8] - 2026-04-10
+
+### Added
+- dx: .result() shorthand, bearerWithRefresh exclude, SchemaOf<>
+
 ## [0.0.7] - 2026-04-10
 
 ### Added
