@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.11] - 2026-04-10
+
+### Changed
+- refactor: redesign plugin to export routes instead of pre-built client
+
 ## [0.0.10] - 2026-04-10
 
 ### Fixed
