@@ -1,8 +1,17 @@
 # @bajustone/fetcher
 
-Schema-validated, typed fetch client with OpenAPI support.
+Schema-validated, typed fetch client with OpenAPI support. ~3.7 kB gzipped (tree-shaken).
 
 Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.js, and edge runtimes.
+
+### Why fetcher over openapi-fetch?
+
+[openapi-fetch](https://openapi-ts.dev/openapi-fetch/) gives you typed paths from an OpenAPI spec. fetcher does that too, and adds:
+
+- **Runtime validation** — responses are validated against your schemas at runtime, not just at compile time. Catch API drift before it breaks your UI.
+- **Recursive middleware** — Hono/Koa-shaped dispatcher with per-call override (`middleware: false`). Built-in `bearerWithRefresh` with concurrent-401 dedup and typed `exclude`.
+- **Batteries included** — retry with backoff/jitter, timeout, error extraction, `.result()` / `.unwrap()` / `.query()` primitives, instance forking via `.with()`.
+- **Standard Schema V1** — not locked to Zod. Works with Valibot, ArkType, or any schema with `~standard.validate`.
 
 ## Features
 
@@ -124,6 +133,8 @@ if (result.ok) {
 
 The plugin watches the spec file during dev and regenerates on change.
 
+> **TypeScript setup:** The plugin generates a `fetcher-env.d.ts` ambient module declaration. Make sure it's covered by your `tsconfig.json` `include` glob. In SvelteKit, this means it must live inside `src/` (e.g., `output: './src/lib/api'`).
+
 #### Option B: Manual setup (no plugin)
 
 ```typescript
@@ -191,6 +202,28 @@ if (issues.length > 0) {
   process.exit(1);
 }
 ```
+
+#### Spec coverage
+
+`coverage(spec)` reports per-route schema complexity — which routes are fully typed, which fall back to `unknown`, and why:
+
+```typescript
+import { coverage } from '@bajustone/fetcher';
+import spec from './openapi.json' with { type: 'json' };
+
+const report = coverage(spec);
+
+console.log(report.summary);
+// { total: 24, fullyTyped: 18, partial: 4, untyped: 2 }
+
+for (const route of report.routes) {
+  if (route.fallbackReasons.length > 0) {
+    console.warn(`${route.method} ${route.path}:`, route.fallbackReasons);
+  }
+}
+```
+
+Each route in `report.routes` includes `bodyTyped`, `responseTyped`, `errorTyped` flags and a `fallbackReasons` array explaining why any slot couldn't be fully typed (e.g., unsupported `oneOf`/`allOf` combinations, recursive `$ref`).
 
 ### 2. Manual route schemas
 
@@ -342,6 +375,18 @@ queryClient.setQueryData(usersKey, (old) => [...old, optimisticUser]);
 | `.unwrap()` | `data` | `FetcherRequestError` | Load functions, remote functions, server actions |
 | `.query()` | `{ key, fn }` | `fn()` throws | TanStack Query, SWR, any caching library |
 
+## Configuration reference
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `baseUrl` | `string` | — | **Required.** Prepended to every request path. No trailing slash needed. |
+| `routes` | `Routes` | `{}` | Route schemas — from `fromOpenAPI(spec)`, the Vite plugin, or hand-written. |
+| `middleware` | `Middleware[]` | `[]` | Request/response pipeline, executed in order. |
+| `defaultHeaders` | `Record<string, string>` | `{}` | Headers merged into every outgoing request. Per-call headers win. |
+| `fetch` | `FetchFn` | `globalThis.fetch` | Custom fetch implementation (SvelteKit load `fetch`, Cloudflare Workers, test mocks). |
+| `timeout` | `number` | — | Auto-prepend a `timeout()` middleware (ms). Per-call `timeout` overrides. |
+| `retry` | `number \| RetryOptions` | — | Auto-prepend a `retry()` middleware. Number shorthand = `{ attempts: n }`. Per-call `retry` overrides. |
+
 ## Middleware
 
 ```typescript
@@ -376,6 +421,49 @@ const f = createFetch<paths>({
 | `bearerWithRefresh<Paths>(opts)` | Bearer auth + 401-refresh-retry. Concurrent 401s share one in-flight refresh. The `exclude` field lists paths that skip auth entirely — typed against the `Paths` generic for autocomplete and compile-time typo checking. |
 | `retry(opts)` | Re-invokes the chain on retryable failures. Defaults: 3 attempts, exponential backoff with jitter, retries on `[408, 425, 429, 500, 502, 503, 504]`. Honors `Retry-After`. |
 | `timeout(ms)` | Aborts a single request after `ms` ms. Merged with any user signal. |
+
+### Custom middleware
+
+A middleware is an async function that receives a `Request` and a `next` function, and returns a `Response`. Call `next()` to continue the chain:
+
+```typescript
+import type { Middleware } from '@bajustone/fetcher';
+
+const logger: Middleware = async (request, next) => {
+  console.log('→', request.method, request.url);
+  const response = await next(request);
+  console.log('←', response.status);
+  return response;
+};
+
+const f = createFetch({
+  baseUrl: 'https://api.example.com',
+  middleware: [logger],
+});
+```
+
+You can modify the request before calling `next`, inspect or transform the response after, or skip `next` entirely to short-circuit:
+
+```typescript
+const cacheMiddleware: Middleware = async (request, next) => {
+  const cached = cache.get(request.url);
+  if (cached) return cached;              // short-circuit
+  const response = await next(request);
+  cache.set(request.url, response.clone());
+  return response;
+};
+```
+
+### `exclude` matching in `bearerWithRefresh`
+
+The `exclude` option determines which paths skip auth. It accepts four forms:
+
+| Form | Matching behavior |
+|---|---|
+| `string` | **Exact pathname match** — `"/auth/login"` matches only `/auth/login`, not `/auth/login/setup`. |
+| `string[]` | Exact match against any entry in the array. |
+| `RegExp` | Tested against the full request URL. |
+| `(request: Request) => boolean` | Arbitrary predicate — return `true` to skip auth. |
 
 ### Per-call overrides
 
