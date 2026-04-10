@@ -13,6 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { extractRouteSchemas } from '../src/openapi.ts';
 import { fetcherPlugin } from '../src/vite-plugin.ts';
 
 const SPEC_PATH = join(import.meta.dirname!, '..', 'tests', 'fixtures', 'petstore.json');
@@ -80,16 +81,76 @@ describe('fetcherPlugin', () => {
     it('returns the virtual module code for the resolved virtual ID', () => {
       const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher');
       expect(code).not.toBeNull();
-      expect(code).toContain('import { createFetch, fromOpenAPI } from \'@bajustone/fetcher\'');
-      expect(code).toContain('import spec from');
+      expect(code).toContain('import { createFetch, JSONSchemaValidator } from \'@bajustone/fetcher\'');
       expect(code).toContain('baseUrl: \'https://api.example.com\'');
-      expect(code).toContain('fromOpenAPI(spec)');
       expect(code).toContain('export const api');
+      expect(code).toContain('__buildRoutes');
+    });
+
+    it('does not import the full spec JSON', () => {
+      const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher');
+      expect(code).not.toContain('import spec from');
+      expect(code).not.toContain('fromOpenAPI');
+      expect(code).not.toContain('export { spec }');
+    });
+
+    it('inlines only extracted schemas, not the full spec', () => {
+      const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher')!;
+      // Should contain schema fragments from the petstore fixture
+      expect(code).toContain('"type":"object"');
+      // Should NOT contain spec metadata (descriptions, summaries, etc.)
+      expect(code).not.toContain('Petstore');
+      expect(code).not.toContain('operationId');
+      expect(code).not.toContain('A paged array of pets');
     });
 
     it('returns null for other module IDs', () => {
       const code = (plugin.load as (id: string) => string | null)('some-other-module');
       expect(code).toBeNull();
     });
+  });
+});
+
+describe('extractRouteSchemas', () => {
+  const spec = JSON.parse(readFileSync(SPEC_PATH, 'utf-8'));
+
+  it('extracts route schemas from the petstore fixture', () => {
+    const result = extractRouteSchemas(spec);
+
+    expect(result.routes['/pets']).toBeDefined();
+    expect(result.routes['/pets']!.GET).toBeDefined();
+    expect(result.routes['/pets']!.POST).toBeDefined();
+    expect(result.routes['/pets/{petId}']).toBeDefined();
+    expect(result.routes['/pets/{petId}']!.GET).toBeDefined();
+  });
+
+  it('extracts query params for GET /pets', () => {
+    const result = extractRouteSchemas(spec);
+    const query = result.routes['/pets']!.GET!.query;
+    expect(query).toBeDefined();
+    expect(query!.properties!.limit).toEqual({ type: 'integer' });
+  });
+
+  it('extracts body schema for POST /pets', () => {
+    const result = extractRouteSchemas(spec);
+    const body = result.routes['/pets']!.POST!.body;
+    expect(body).toBeDefined();
+    expect(body!.$ref).toBe('#/components/schemas/Pet');
+  });
+
+  it('extracts definitions from components.schemas', () => {
+    const result = extractRouteSchemas(spec);
+    const pet = (result.definitions as Record<string, any>).components?.schemas?.Pet;
+    expect(pet).toBeDefined();
+    expect(pet.type).toBe('object');
+    expect(pet.properties.name).toEqual({ type: 'string' });
+  });
+
+  it('does not include spec metadata', () => {
+    const result = extractRouteSchemas(spec);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('operationId');
+    expect(serialized).not.toContain('A paged array of pets');
+    expect(serialized).not.toContain('Pet collection');
   });
 });

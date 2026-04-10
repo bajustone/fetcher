@@ -11,6 +11,25 @@ import type { HttpMethod, InferRoutesFromSpec, RouteDefinition, Routes } from '.
 import { JSONSchemaValidator } from './json-schema-validator.ts';
 
 /**
+ * Raw schema data extracted from an OpenAPI spec — the build-time
+ * counterpart of the runtime `Routes` object. Contains only the JSON
+ * Schema nodes needed for validation, not the full spec.
+ *
+ * Used by the Vite/Rollup plugin to inline schemas at build time so the
+ * full OpenAPI spec is never shipped to the client bundle.
+ */
+export interface ExtractedRouteSchemas {
+  definitions: Record<string, JSONSchemaDefinition>;
+  routes: Record<string, Record<string, {
+    body?: JSONSchemaDefinition;
+    response?: JSONSchemaDefinition;
+    errorResponse?: JSONSchemaDefinition;
+    params?: JSONSchemaDefinition;
+    query?: JSONSchemaDefinition;
+  }>>;
+}
+
+/**
  * Loose OpenAPI 3.x spec shape — the public input type for {@link fromOpenAPI}.
  *
  * Uses `any` index signatures so that an `import spec from './openapi.json'`
@@ -266,4 +285,74 @@ function extractParams(
     properties,
     ...(required.length > 0 ? { required } : {}),
   };
+}
+
+/**
+ * Extracts only the JSON Schema nodes needed for validation from an
+ * OpenAPI spec — without constructing `JSONSchemaValidator` instances.
+ *
+ * This is the build-time companion to {@link fromOpenAPI}: the Vite/Rollup
+ * plugin calls this at build time, serializes the result as inline JSON,
+ * and reconstructs validators on the client from the pre-extracted data.
+ * The full spec never reaches the bundle.
+ */
+export function extractRouteSchemas(spec: OpenAPISpec): ExtractedRouteSchemas {
+  const definitions = buildDefinitions(spec);
+  const routes: ExtractedRouteSchemas['routes'] = {};
+
+  if (!spec.paths)
+    return { definitions, routes };
+
+  for (const [path, pathItem] of Object.entries(spec.paths)) {
+    if (!pathItem || typeof pathItem !== 'object')
+      continue;
+
+    const methodDefs: Record<string, {
+      body?: JSONSchemaDefinition;
+      response?: JSONSchemaDefinition;
+      errorResponse?: JSONSchemaDefinition;
+      params?: JSONSchemaDefinition;
+      query?: JSONSchemaDefinition;
+    }> = {};
+
+    for (const [method, rawOperation] of Object.entries(pathItem as Record<string, unknown>)) {
+      if (!HTTP_METHODS.has(method))
+        continue;
+      if (!rawOperation || typeof rawOperation !== 'object')
+        continue;
+
+      const operation = rawOperation as OpenAPIOperation;
+      const schemas: typeof methodDefs[string] = {};
+
+      const bodySchema = extractBodySchema(operation);
+      if (bodySchema)
+        schemas.body = bodySchema;
+
+      const responseSchema = extractResponseSchema(operation);
+      if (responseSchema)
+        schemas.response = responseSchema;
+
+      const errorSchema = extractErrorSchema(operation);
+      if (errorSchema)
+        schemas.errorResponse = errorSchema;
+
+      const params = extractParams(operation, 'path');
+      if (params)
+        schemas.params = params;
+
+      const query = extractParams(operation, 'query');
+      if (query)
+        schemas.query = query;
+
+      if (Object.keys(schemas).length > 0) {
+        methodDefs[method.toUpperCase()] = schemas;
+      }
+    }
+
+    if (Object.keys(methodDefs).length > 0) {
+      routes[path] = methodDefs;
+    }
+  }
+
+  return { definitions, routes };
 }

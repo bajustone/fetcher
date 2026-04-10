@@ -38,8 +38,9 @@
  */
 
 import { execSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { extractRouteSchemas } from './openapi.ts';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -94,6 +95,8 @@ const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_MODULE_ID}`;
  * 2. **Provides `virtual:fetcher`** — a virtual module exporting a
  *    pre-configured `createFetch<paths>(...)` client so the user writes
  *    `import { api } from 'virtual:fetcher'` with zero boilerplate.
+ *    Only the JSON Schema nodes needed for validation are inlined — the
+ *    full OpenAPI spec is never shipped to the client bundle.
  * 3. **Emits `fetcher-env.d.ts`** — a module declaration that types the
  *    virtual module so TypeScript sees `api` as fully typed.
  */
@@ -126,19 +129,34 @@ export function fetcherPlugin(options: FetcherPluginOptions): FetcherPlugin {
     },
 
     // Rollup hook: provide the virtual module's source code.
+    // Extracts only the JSON Schema nodes needed for validation at build
+    // time — the full OpenAPI spec is never shipped to the client bundle.
     load(id: string) {
       if (id !== RESOLVED_VIRTUAL_ID)
         return null;
 
-      // The virtual module imports the raw JSON spec for runtime validation
-      // via fromOpenAPI, and re-exports a pre-configured typed client.
-      // The `<paths>` generic is type-only and erased at runtime — the
-      // type information comes from fetcher-env.d.ts.
+      const rawSpec = JSON.parse(readFileSync(specPath, 'utf-8'));
+      const { definitions, routes } = extractRouteSchemas(rawSpec);
+
       return [
-        `import { createFetch, fromOpenAPI } from '@bajustone/fetcher';`,
-        `import spec from '${specPath}';`,
-        `export const api = createFetch({ baseUrl: '${baseUrl}', routes: fromOpenAPI(spec) });`,
-        `export { spec };`,
+        `import { createFetch, JSONSchemaValidator } from '@bajustone/fetcher';`,
+        `const __defs = ${JSON.stringify(definitions)};`,
+        `const __routes = ${JSON.stringify(routes)};`,
+        `function __buildRoutes(extracted, defs) {`,
+        `  const r = {};`,
+        `  for (const [path, methods] of Object.entries(extracted)) {`,
+        `    r[path] = {};`,
+        `    for (const [method, schemas] of Object.entries(methods)) {`,
+        `      const d = {};`,
+        `      for (const [key, schema] of Object.entries(schemas)) {`,
+        `        d[key] = new JSONSchemaValidator(schema, defs);`,
+        `      }`,
+        `      r[path][method] = d;`,
+        `    }`,
+        `  }`,
+        `  return r;`,
+        `}`,
+        `export const api = createFetch({ baseUrl: '${baseUrl}', routes: __buildRoutes(__routes, __defs) });`,
       ].join('\n');
     },
 
@@ -220,8 +238,6 @@ function emitEnvDeclaration(envDtsPath: string, baseUrl: string): void {
     `  import type { Routes, TypedFetchFn } from '@bajustone/fetcher';`,
     `  /** Pre-configured typed fetch client. Base URL: \`${baseUrl}\` */`,
     `  export const api: TypedFetchFn<Routes, paths>;`,
-    `  /** Raw OpenAPI spec object (for runtime use). */`,
-    `  export const spec: unknown;`,
     `}`,
     ``,
   ].join('\n');

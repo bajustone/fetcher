@@ -62,7 +62,8 @@ export type { JSONSchemaDefinition } from './json-schema-validator.ts';
 export { authBearer, bearerWithRefresh, retry, timeout } from './middleware.ts';
 export type { BearerWithRefreshOptions } from './middleware.ts';
 
-export { fromOpenAPI } from './openapi.ts';
+export { extractRouteSchemas, fromOpenAPI } from './openapi.ts';
+export type { ExtractedRouteSchemas } from './openapi.ts';
 
 export { coverage, lintSpec } from './spec-tools.ts';
 export type {
