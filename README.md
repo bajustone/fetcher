@@ -6,16 +6,17 @@ Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.j
 
 ## Features
 
-- **100% native fetch** — the returned object is a real `Response`. All native methods work (`.json()`, `.text()`, `.blob()`, `.headers`, `.status`, ...) on the same object that exposes `.result()`.
-- **Typed `.result()`** — discriminated union `{ ok: true; data } | { ok: false; error }`. Never throws. Idempotent — calling `.result()` more than once returns the same cached value.
+- **100% native fetch** — the returned object is a real `Response`. All native methods (`.json()`, `.text()`, `.blob()`, `.headers`, `.status`) work alongside `.result()`.
+- **One-liner `.result()`** — `await f.get('/pets').result()` collapses two awaits into one. Returns a discriminated union `{ ok: true; data } | { ok: false; error }`. Never throws. Idempotent.
 - **Discriminated `FetcherError`** — `{ kind: 'network' | 'validation' | 'http', ... }`. Network failures, schema-validation issues, and HTTP error responses are all distinguishable without `instanceof` checks.
-- **Standard Schema V1** — works with Zod 3.24+, Valibot, ArkType, the bundled `JSONSchemaValidator`, or any value with a `~standard.validate` property. Zero migration for the major validators.
-- **OpenAPI 3.x** — `fromOpenAPI(spec)` generates routes with built-in JSON Schema validation. The return type is generic over the literal spec, so path autocomplete and method narrowing flow from the spec without a separate codegen step.
-- **Composable middleware** — Hono/Koa-shaped, with a recursive dispatcher that supports replay (retry middleware actually works). Per-call `middleware: false` or `middleware: [...]` override.
-- **Built-in middlewares** — `authBearer`, `bearerWithRefresh` (with concurrent-401 dedup and refresh-endpoint exclusion), `timeout`, `retry` (exponential backoff with jitter, honors `Retry-After`).
-- **Method shortcuts** — `f.get(path)`, `f.post(path, opts)`, etc. as additive sugar over the canonical long-form call.
+- **Standard Schema V1** — works with Zod 3.24+, Valibot, ArkType, the bundled `JSONSchemaValidator`, or any value with a `~standard.validate` property.
+- **OpenAPI 3.x** — `fromOpenAPI(spec)` builds runtime validators from a spec. Pass an `openapi-typescript`-generated `paths` interface as a generic for full body/response/error type inference.
+- **Vite/Rollup plugin** — `fetcherPlugin()` auto-generates `paths.d.ts`, provides a `virtual:fetcher` module, and watches the spec for changes during dev. Import as `@bajustone/fetcher/vite`.
+- **Composable middleware** — Hono/Koa-shaped recursive dispatcher. Per-call `middleware: false` or `middleware: [...]` override.
+- **Built-in middlewares** — `authBearer`, `bearerWithRefresh` (with concurrent-401 dedup and `exclude` list), `timeout`, `retry` (exponential backoff with jitter, honors `Retry-After`).
+- **Method shortcuts** — `f.get(path)`, `f.post(path, opts)`, etc.
 - **Instance forking** — `f.with(overrides)` returns a sibling client inheriting everything from the parent except the named overrides.
-- **Per-call `fetch` override** — drop in SvelteKit's load `fetch`, Cloudflare's `fetch`, or any custom implementation per call.
+- **Per-call `fetch` override** — drop in SvelteKit's load `fetch`, Cloudflare's `fetch`, or any custom implementation.
 
 ## Installation
 
@@ -44,16 +45,11 @@ const f = createFetch({
   },
 });
 
-const response = await f.post('/auth/login', {
+// One-liner: .result() is available directly on the promise
+const result = await f.post('/auth/login', {
   body: { email: 'a@b.com', password: 'secret' },
-});
+}).result();
 
-// Native Response methods work
-response.ok;     // boolean
-response.status; // number
-
-// Typed + validated
-const result = await response.result();
 if (result.ok) {
   console.log(result.data.token); // typed: string
 } else {
@@ -63,19 +59,59 @@ if (result.ok) {
     case 'http':       console.error('http', result.error.status, result.error.body); break;
   }
 }
+
+// The intermediate Response is still accessible when you need it:
+const response = await f.get('/users');
+response.ok;     // boolean
+response.status; // number
+const result2 = await response.result();
 ```
 
 ## Three modes
 
 ### 1. OpenAPI
 
-Fully typed body / response / error inference from an OpenAPI 3.x spec, with runtime validation built in. Two pieces compose:
+Fully typed body / response / error inference from an OpenAPI 3.x spec, with runtime validation built in.
 
-1. **Runtime validators** — `fromOpenAPI(spec)` parses the spec at startup and builds JSON Schema validators for every route's body / params / query / response / errorResponse. Zero codegen step.
-2. **Type inference** — pass an `openapi-typescript`-generated `paths` interface as a generic to `createFetch<paths>(...)`. Body, response, and error types flow through to every call site, including `result.data` and `result.error.body`.
+#### Option A: Vite/Rollup plugin (recommended)
+
+The plugin auto-generates `paths.d.ts` from your spec and provides a `virtual:fetcher` module with a pre-configured typed client. Zero boilerplate.
 
 ```typescript
-import type { paths } from './generated/petstore-paths';
+// vite.config.ts
+import { fetcherPlugin } from '@bajustone/fetcher/vite';
+
+export default defineConfig({
+  plugins: [
+    fetcherPlugin({
+      spec: './openapi.json',
+      baseUrl: 'https://api.example.com',
+      output: './src/lib/api', // where paths.d.ts + fetcher-env.d.ts land
+    }),
+  ],
+});
+```
+
+```typescript
+// anywhere in your app
+import { api } from 'virtual:fetcher';
+
+const result = await api.get('/pets/{petId}', {
+  params: { petId: '42' },
+}).result();
+
+if (result.ok) {
+  result.data.id;   // typed: number — from the spec's Pet schema
+  result.data.name; // typed: string
+}
+```
+
+The plugin watches the spec file during dev and regenerates on change.
+
+#### Option B: Manual setup (no plugin)
+
+```typescript
+import type { paths } from './generated/paths';
 import { createFetch, fromOpenAPI } from '@bajustone/fetcher';
 import spec from './openapi.json' with { type: 'json' };
 
@@ -83,69 +119,45 @@ const f = createFetch<paths>({
   baseUrl: 'https://api.example.com',
   routes: fromOpenAPI(spec),
 });
+```
 
-const res = await f('/pets/{petId}', { method: 'GET', params: { petId: '42' } });
-//  ^^^^^^^^^^^^^^                                   ^^^^^^^^^^^^^^^^^^^
-//   autocompletes from spec                          inferred from path template
+Generate `paths.d.ts` with `openapi-typescript`:
 
-const result = await res.result();
-if (result.ok) {
-  result.data.id;   // typed: number  — from the spec's Pet schema
-  result.data.name; // typed: string
-} else if (result.error.kind === 'http') {
-  result.error.body.message; // typed: string — from the spec's Error schema
+```bash
+bun add -d openapi-typescript
+openapi-typescript ./openapi.json -o ./src/generated/paths.d.ts
+```
+
+Add a `package.json` script so types stay in sync with the spec:
+
+```json
+{
+  "scripts": {
+    "gen:api": "openapi-typescript ./openapi.json -o ./src/generated/paths.d.ts",
+    "predev": "bun run gen:api",
+    "prebuild": "bun run gen:api"
+  }
 }
 ```
 
-#### Setup
+#### Extracting component schema types
 
-1. Install `openapi-typescript` as a dev dependency (it's only used at build time; fetcher itself ships zero runtime deps):
-
-   ```bash
-   bun add -d openapi-typescript
-   ```
-
-2. Add a script to your `package.json` so generated types stay in sync with the spec:
-
-   ```json
-   {
-     "scripts": {
-       "gen:api": "openapi-typescript ./openapi.json -o ./src/generated/petstore-paths.d.ts",
-       "predev": "bun run gen:api",
-       "prebuild": "bun run gen:api"
-     }
-   }
-   ```
-
-3. Optional: hide the `<paths>` generic behind a small wrapper file so call sites just `import { api }`:
-
-   ```typescript
-   // src/api.ts
-   import type { paths } from './generated/petstore-paths';
-   import { createFetch, fromOpenAPI } from '@bajustone/fetcher';
-   import spec from '../openapi.json' with { type: 'json' };
-
-   export const api = createFetch<paths>({
-     baseUrl: 'https://api.example.com',
-     routes: fromOpenAPI(spec),
-   });
-   ```
-
-   Then everywhere else: `import { api } from './api'` and call it like the example above. No generic-passing in user code.
-
-#### Why two derivations from one spec?
-
-Types and runtime validation are decoupled on purpose. Types come from `openapi-typescript` codegen so the type story doesn't depend on TypeScript's conditional-type performance budget. Runtime comes from `fromOpenAPI(spec)` so the runtime story doesn't depend on `openapi-typescript`'s release schedule. One source of truth (`openapi.json`), two derivations.
-
-#### Spec linting and complexity audit
-
-Two library functions help you keep the spec honest:
-
-- **`lintSpec(spec)`** flags every keyword the runtime `JSONSchemaValidator` does NOT enforce (e.g., `format: 'email'` types as `string` but runtime accepts non-emails). Run from CI to fail builds on silent drift.
-- **`coverage(spec)`** reports per-route which schema features your spec uses — `oneOf`, `allOf`, recursive `$ref`, and so on. Useful as a complexity audit ("how much of my surface area uses the harder JSON Schema features?") even though the `<paths>` flow already handles all of them. See `docs/architecture.md` → "Why no zero-codegen OpenAPI inference?" for the historical context behind this function.
+Use `SchemaOf` to extract named schemas from the generated `components` interface without writing the full path:
 
 ```typescript
-import { coverage, lintSpec } from '@bajustone/fetcher';
+import type { SchemaOf } from '@bajustone/fetcher';
+import type { components } from './generated/paths';
+
+type Pet = SchemaOf<components, 'Pet'>;
+//   ^? { id: number; name: string; tag?: string }
+```
+
+#### Spec linting
+
+`lintSpec(spec)` flags every keyword the runtime validator does NOT enforce (e.g., `format: 'email'` types as `string` but runtime accepts non-emails). Run from CI:
+
+```typescript
+import { lintSpec } from '@bajustone/fetcher';
 import spec from './openapi.json' with { type: 'json' };
 
 const issues = lintSpec(spec);
@@ -154,12 +166,7 @@ if (issues.length > 0) {
     console.error(`${i.severity}: ${i.pointer} — ${i.message}`);
   process.exit(1);
 }
-
-const report = coverage(spec);
-console.log(`${report.summary.fullyTyped}/${report.summary.total} routes use only the simple subset`);
 ```
-
-See [`docs/architecture.md`](./docs/architecture.md) for the validator-vs-type drift surface and the full hybrid workflow rationale.
 
 ### 2. Manual route schemas
 
@@ -179,51 +186,29 @@ const f = createFetch({
   },
 });
 
-const res = await f.get('/users/{id}', { params: { id: '42' } });
-const result = await res.result();
+const result = await f.get('/users/{id}', { params: { id: '42' } }).result();
 if (result.ok) {
   result.data; // { id: string; name: string }
 }
 ```
 
-Any Standard Schema V1 schema works — Zod 3.24+, Valibot, ArkType all qualify natively. Bare `{ parse(data): T }` validators need a five-line wrapper:
-
-```typescript
-import type { StandardSchemaV1 } from '@bajustone/fetcher';
-
-function toStandardSchema<T>(parser: { parse(data: unknown): T }): StandardSchemaV1<unknown, T> {
-  return {
-    '~standard': {
-      version: 1,
-      vendor: 'custom',
-      validate: (value) => {
-        try { return { value: parser.parse(value) }; }
-        catch (e) { return { issues: [{ message: String(e) }] }; }
-      },
-    },
-  };
-}
-```
+Any Standard Schema V1 schema works — Zod 3.24+, Valibot, ArkType all qualify natively.
 
 ### 3. Ad-hoc per-call schema
 
 ```typescript
-import { createFetch } from '@bajustone/fetcher';
-import { z } from 'zod';
-
 const f = createFetch({ baseUrl: 'https://api.example.com' });
 
-const res = await f.get('/endpoint', {
+const result = await f.get('/endpoint', {
   responseSchema: z.object({ ok: z.boolean() }),
-});
+}).result();
 
-const result = await res.result();
 if (result.ok) {
-  result.data.ok; // typed boolean — inference flows from the per-call schema
+  result.data.ok; // typed boolean
 }
 ```
 
-The per-call `responseSchema` wins over any route-declared `response`, so you can layer one on top of an OpenAPI route to get typed access while body/response inference is pending.
+The per-call `responseSchema` wins over any route-declared `response`.
 
 ## Result and error model
 
@@ -236,34 +221,26 @@ type ResultData<T, HttpBody = unknown> =
 
 type FetcherError<HttpBody = unknown> =
   | { readonly kind: 'network';    readonly cause: unknown }
-  | { readonly kind: 'validation'; readonly location: 'body' | 'params' | 'query' | 'response'; readonly issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<...> }> }
+  | { readonly kind: 'validation'; readonly location: 'body' | 'params' | 'query' | 'response'; readonly issues: ReadonlyArray<...> }
   | { readonly kind: 'http';       readonly status: number; readonly body: HttpBody }
 ```
 
-`.result()` is like `.json()` but:
+`.result()` is available in two places:
 
-- Parses JSON and validates against the schema
-- Returns the discriminated union — never throws
-- Surfaces network failures, body/params/query validation errors (client-side), response validation errors (server-side), and HTTP error responses through one error path
-- Is idempotent (cached after the first call)
-- Reads from an internal `response.clone()`, so calling `.result()` and any native body method (`.json()`, `.blob()`, ...) on the same response in any order is safe
+- **On the promise:** `await f.get('/path').result()` — one-liner, resolves directly to `ResultData`.
+- **On the response:** `const r = await f.get('/path'); await r.result()` — when you need the intermediate `Response` for headers, status, streaming, etc.
+
+Both are idempotent and never throw.
 
 ## Middleware
 
 ```typescript
-import {
-  authBearer,
-  bearerWithRefresh,
-  createFetch,
-  retry,
-  timeout,
-} from '@bajustone/fetcher';
+import { bearerWithRefresh, createFetch } from '@bajustone/fetcher';
 
 const f = createFetch({
   baseUrl: 'https://api.example.com',
-  // Auto-prepended built-ins (also configurable per-call):
-  retry: 3,           // or { attempts, backoff, factor, maxBackoff, retryOn }
-  timeout: 5_000,     // milliseconds; merged with any user signal
+  retry: 3,
+  timeout: 5_000,
   middleware: [
     bearerWithRefresh({
       getToken: () => sessionStorage.getItem('access_token'),
@@ -273,55 +250,30 @@ const f = createFetch({
         sessionStorage.setItem('access_token', access_token);
         return access_token;
       },
-      refreshEndpoint: '/auth/refresh',
+      exclude: ['/auth/login', '/auth/logout', '/auth/refresh'],
     }),
-    async (req, next) => {
-      console.log('→', req.method, req.url);
-      const res = await next(req);
-      console.log('←', res.status);
-      return res;
-    },
   ],
 });
 ```
-
-The middleware contract is `(request, next) => Promise<Response>`, where `next` accepts an optional `Request` argument so retry middleware can replay the chain with a fresh request:
-
-```typescript
-const myRetry: Middleware = async (request, next) => {
-  let res = await next(request.clone());
-  if (res.status >= 500) res = await next(request.clone());
-  return res;
-};
-```
-
-`executeMiddleware` is a recursive dispatcher — calling `next` more than once re-runs every downstream middleware (and the underlying fetch), not just the final hop.
 
 ### Built-in middlewares
 
 | Middleware | Purpose |
 |---|---|
 | `authBearer(getToken)` | Attaches `Authorization: Bearer <token>` per request. |
-| `bearerWithRefresh({ getToken, refresh, refreshEndpoint })` | Adds 401-refresh-retry on top of bearer auth. Concurrent 401s share one in-flight refresh. The refresh endpoint itself is excluded from the loop to avoid deadlock. |
-| `retry(opts)` | Re-invokes the chain on retryable failures. Defaults: 3 attempts, exponential backoff with ±25% jitter, retries on `[408, 425, 429, 500, 502, 503, 504]`. Honors `Retry-After` (numeric or HTTP-date). Clones the request body between attempts. |
-| `timeout(ms)` | Aborts a single request after `ms` ms. Merged with any user `request.signal`. |
+| `bearerWithRefresh(opts)` | Bearer auth + 401-refresh-retry. Concurrent 401s share one in-flight refresh. The `exclude` field lists paths that skip auth entirely (login, logout, refresh, etc.). |
+| `retry(opts)` | Re-invokes the chain on retryable failures. Defaults: 3 attempts, exponential backoff with jitter, retries on `[408, 425, 429, 500, 502, 503, 504]`. Honors `Retry-After`. |
+| `timeout(ms)` | Aborts a single request after `ms` ms. Merged with any user signal. |
 
-### Per-call middleware override
+### Per-call overrides
 
 ```typescript
-// Skip the configured chain entirely (e.g. for an auth-refresh endpoint)
-await f.post('/auth/refresh', { middleware: false });
-
-// Replace the chain for this call only
-await f.get('/health', { middleware: [] });
-
-// Per-call timeout / retry override
-await f.get('/slow-endpoint', { timeout: 30_000, retry: 5 });
+await f.post('/auth/login', { middleware: false }); // skip all middleware
+await f.get('/health', { middleware: [] });          // empty chain
+await f.get('/slow', { timeout: 30_000, retry: 5 }); // per-call timeout/retry
 ```
 
 ## Method shortcuts and instance forking
-
-Method shortcuts are sugar over the long-form call. The long-form `f(path, { method: 'GET' })` continues to work.
 
 ```typescript
 await f.get('/users');
@@ -331,7 +283,7 @@ await f.delete('/users/{id}', { params: { id: '1' } });
 await f.patch('/users/{id}', { params: { id: '1' }, body: { active: false } });
 ```
 
-`f.with(overrides)` derives a sibling client over a shallow-merged config — useful for an auth-free helper:
+`f.with(overrides)` derives a sibling client over a shallow-merged config:
 
 ```typescript
 const api = createFetch({
@@ -340,43 +292,44 @@ const api = createFetch({
 });
 
 const noAuth = api.with({ middleware: [] });
-
 await noAuth.post('/auth/login', { body: { email, password } });
 ```
-
-The parent is unaffected — `with` returns a brand-new function over a shallow-merged config.
 
 ## Per-call fetch override
 
 ```typescript
+// SvelteKit load function
 export async function load({ fetch }) {
-  const res = await f.get('/users', { fetch });
-  return res.result();
+  return f.get('/users', { fetch }).result();
 }
 ```
 
-Useful for SvelteKit's load `fetch`, Cloudflare Workers, or test mocks.
-
 ## API reference
 
-### Runtime
+### Runtime exports (`@bajustone/fetcher`)
 
 | Export | Purpose |
 |---|---|
-| `createFetch(config)` | Factory returning a typed fetch function. Optional `<paths>` generic for openapi-typescript inference. |
-| `fromOpenAPI(spec)` | Converts an OpenAPI 3.x spec into typed routes. Generic over the spec literal. |
-| `lintSpec(spec)` | Walks an OpenAPI 3.x spec; returns every keyword the runtime validator doesn't enforce. CI gate for type-vs-runtime drift. |
-| `coverage(spec)` | Walks an OpenAPI 3.x spec; reports per-route which schema features (`oneOf`/`allOf`/recursive `$ref`/etc.) each route uses. Complexity audit, not a precondition for any flow. |
+| `createFetch(config)` | Factory returning a typed fetch function. Optional `<paths>` generic for OpenAPI type inference. |
+| `fromOpenAPI(spec)` | Converts an OpenAPI 3.x spec into routes with runtime validators. |
+| `lintSpec(spec)` | Walks an OpenAPI 3.x spec; returns every keyword the runtime validator doesn't enforce. |
+| `coverage(spec)` | Walks an OpenAPI 3.x spec; reports per-route schema complexity (`oneOf`/`allOf`/recursive `$ref`/etc.). |
 | `authBearer(getToken)` | Bearer-token middleware. |
-| `bearerWithRefresh(opts)` | Bearer auth + 401-refresh-retry middleware. |
+| `bearerWithRefresh(opts)` | Bearer auth + 401-refresh-retry middleware with `exclude` list. |
 | `retry(opts)` | Retry middleware (number shorthand or `RetryOptions`). |
 | `timeout(ms)` | Per-request timeout middleware. |
 | `JSONSchemaValidator` | Bundled JSON Schema validator implementing Standard Schema V1. |
 | `ValidationError` | Thrown by the legacy `JSONSchemaValidator.parse()` (deprecated; prefer `~standard.validate`). |
 
+### Plugin export (`@bajustone/fetcher/vite`)
+
+| Export | Purpose |
+|---|---|
+| `fetcherPlugin(opts)` | Rollup/Vite plugin. Auto-generates `paths.d.ts`, provides `virtual:fetcher` module, watches spec during dev. |
+
 ### Types
 
-`FetchConfig`, `FetcherError`, `FetcherErrorLocation`, `Middleware`, `ResultData`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `StandardSchemaV1`, `TypedFetchFn`, `TypedResponse`, `BearerWithRefreshOptions`, `InferOutput`, `InferRoutesFromSpec`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, plus the OpenAPI-paths inference helpers (`OpenAPIPaths`, `FilterKeys`, `MediaType`, `ResolveBodyFor`, `ResolveResponseFor`, `ResolveErrorResponseFor`, `IsTypedCall`, `AvailablePaths`, `AvailableMethods`).
+`TypedFetchFn`, `TypedFetchPromise`, `TypedResponse`, `ResultData`, `FetcherError`, `FetcherErrorLocation`, `FetchConfig`, `Middleware`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `SchemaOf`, `StandardSchemaV1`, `BearerWithRefreshOptions`, `FetcherPlugin`, `FetcherPluginOptions`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, `InferRoutesFromSpec`, `InferOutput`.
 
 See [`docs/architecture.md`](./docs/architecture.md) for implementation details.
 

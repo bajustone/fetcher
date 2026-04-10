@@ -3,7 +3,8 @@
   "version": "0.0.3",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./vite": "./src/vite-plugin.ts"
   },
   "publish": {
     "include": ["src/**/*.ts", "LICENSE", "README.md", "jsr.json"]
