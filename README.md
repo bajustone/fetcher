@@ -11,9 +11,10 @@ Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.j
 - **Discriminated `FetcherError`** — `{ kind: 'network' | 'validation' | 'http', ... }`. Network failures, schema-validation issues, and HTTP error responses are all distinguishable without `instanceof` checks.
 - **Standard Schema V1** — works with Zod 3.24+, Valibot, ArkType, the bundled `JSONSchemaValidator`, or any value with a `~standard.validate` property.
 - **OpenAPI 3.x** — `fromOpenAPI(spec)` builds runtime validators from a spec. Pass an `openapi-typescript`-generated `paths` interface as a generic for full body/response/error type inference.
-- **Vite/Rollup plugin** — `fetcherPlugin()` auto-generates `paths.d.ts`, provides a `virtual:fetcher` module, and watches the spec for changes during dev. Import as `@bajustone/fetcher/vite`.
+- **Vite/Rollup plugin** — `fetcherPlugin()` auto-generates `paths.d.ts`, provides a `virtual:fetcher` module exporting pre-built route schemas, and watches the spec for changes during dev. Optionally fetches the spec from a remote URL. Import as `@bajustone/fetcher/vite`.
 - **Composable middleware** — Hono/Koa-shaped recursive dispatcher. Per-call `middleware: false` or `middleware: [...]` override.
-- **Built-in middlewares** — `authBearer`, `bearerWithRefresh` (with concurrent-401 dedup and `exclude` list), `timeout`, `retry` (exponential backoff with jitter, honors `Retry-After`).
+- **Built-in middlewares** — `authBearer`, `bearerWithRefresh` (with concurrent-401 dedup and typed `exclude` list), `timeout`, `retry` (exponential backoff with jitter, honors `Retry-After`).
+- **Built-in error extraction** — `extractErrorMessage(error)` turns any `FetcherError` into a human-readable string. No per-project helper needed.
 - **Method shortcuts** — `f.get(path)`, `f.post(path, opts)`, etc.
 - **Instance forking** — `f.with(overrides)` returns a sibling client inheriting everything from the parent except the named overrides.
 - **Per-call `fetch` override** — drop in SvelteKit's load `fetch`, Cloudflare's `fetch`, or any custom implementation.
@@ -75,7 +76,7 @@ Fully typed body / response / error inference from an OpenAPI 3.x spec, with run
 
 #### Option A: Vite/Rollup plugin (recommended)
 
-The plugin auto-generates `paths.d.ts` from your spec and provides a `virtual:fetcher` module with a pre-configured typed client. Zero boilerplate.
+The plugin auto-generates `paths.d.ts` from your spec and provides a `virtual:fetcher` module exporting pre-built route schemas. You construct the client yourself, with full control over middleware, baseUrl, and other config.
 
 ```typescript
 // vite.config.ts
@@ -85,16 +86,31 @@ export default defineConfig({
   plugins: [
     fetcherPlugin({
       spec: './openapi.json',
-      baseUrl: 'https://api.example.com',
       output: './src/lib/api', // where paths.d.ts + fetcher-env.d.ts land
+      url: process.env.OPENAPI_SPEC_URL, // optional: fetch spec from remote
     }),
   ],
 });
 ```
 
 ```typescript
+// src/lib/api/index.ts — your app's API client
+import { createFetch, bearerWithRefresh } from '@bajustone/fetcher';
+import type { paths } from './paths';
+import { routes } from 'virtual:fetcher';
+
+export const api = createFetch<paths>({
+  baseUrl: import.meta.env.VITE_API_URL,
+  routes,
+  middleware: [
+    bearerWithRefresh({ /* ... */ }),
+  ],
+});
+```
+
+```typescript
 // anywhere in your app
-import { api } from 'virtual:fetcher';
+import { api } from '$lib/api';
 
 const result = await api.get('/pets/{petId}', {
   params: { petId: '42' },
@@ -142,14 +158,22 @@ Add a `package.json` script so types stay in sync with the spec:
 
 #### Extracting component schema types
 
-Use `SchemaOf` to extract named schemas from the generated `components` interface without writing the full path:
+When the plugin generates `paths.d.ts`, it appends a pre-applied `Schema` helper (if the spec has `components.schemas`):
+
+```typescript
+import type { Schema } from './paths';
+
+type Pet = Schema<'Pet'>;
+//   ^? { id: number; name: string; tag?: string }
+```
+
+Without the plugin (or for manual setups), use `SchemaOf` directly:
 
 ```typescript
 import type { SchemaOf } from '@bajustone/fetcher';
 import type { components } from './generated/paths';
 
 type Pet = SchemaOf<components, 'Pet'>;
-//   ^? { id: number; name: string; tag?: string }
 ```
 
 #### Spec linting
@@ -232,17 +256,35 @@ type FetcherError<HttpBody = unknown> =
 
 Both are idempotent and never throw.
 
+### Error message extraction
+
+`extractErrorMessage(error)` turns any `FetcherError` into a human-readable string:
+
+```typescript
+import { extractErrorMessage } from '@bajustone/fetcher';
+
+const result = await f.get('/users').result();
+if (!result.ok) {
+  console.error(extractErrorMessage(result.error));
+  // "Network error"          — kind: 'network'
+  // "id: expected string"    — kind: 'validation'
+  // "User not found"         — kind: 'http' (extracts body.message or body.error.message)
+  // "HTTP 500"               — kind: 'http' (fallback)
+}
+```
+
 ## Middleware
 
 ```typescript
 import { bearerWithRefresh, createFetch } from '@bajustone/fetcher';
+import type { paths } from './paths';
 
-const f = createFetch({
+const f = createFetch<paths>({
   baseUrl: 'https://api.example.com',
   retry: 3,
   timeout: 5_000,
   middleware: [
-    bearerWithRefresh({
+    bearerWithRefresh<paths>({
       getToken: () => sessionStorage.getItem('access_token'),
       refresh: async () => {
         const r = await fetch('/auth/refresh', { method: 'POST' });
@@ -250,6 +292,7 @@ const f = createFetch({
         sessionStorage.setItem('access_token', access_token);
         return access_token;
       },
+      // Typed against paths keys — typos are caught at compile time
       exclude: ['/auth/login', '/auth/logout', '/auth/refresh'],
     }),
   ],
@@ -261,7 +304,7 @@ const f = createFetch({
 | Middleware | Purpose |
 |---|---|
 | `authBearer(getToken)` | Attaches `Authorization: Bearer <token>` per request. |
-| `bearerWithRefresh(opts)` | Bearer auth + 401-refresh-retry. Concurrent 401s share one in-flight refresh. The `exclude` field lists paths that skip auth entirely (login, logout, refresh, etc.). |
+| `bearerWithRefresh<Paths>(opts)` | Bearer auth + 401-refresh-retry. Concurrent 401s share one in-flight refresh. The `exclude` field lists paths that skip auth entirely — typed against the `Paths` generic for autocomplete and compile-time typo checking. |
 | `retry(opts)` | Re-invokes the chain on retryable failures. Defaults: 3 attempts, exponential backoff with jitter, retries on `[408, 425, 429, 500, 502, 503, 504]`. Honors `Retry-After`. |
 | `timeout(ms)` | Aborts a single request after `ms` ms. Merged with any user signal. |
 
@@ -311,6 +354,7 @@ export async function load({ fetch }) {
 | Export | Purpose |
 |---|---|
 | `createFetch(config)` | Factory returning a typed fetch function. Optional `<paths>` generic for OpenAPI type inference. |
+| `extractErrorMessage(error)` | Turns a `FetcherError` into a human-readable string. Handles all three error kinds. |
 | `fromOpenAPI(spec)` | Converts an OpenAPI 3.x spec into routes with runtime validators. |
 | `lintSpec(spec)` | Walks an OpenAPI 3.x spec; returns every keyword the runtime validator doesn't enforce. |
 | `coverage(spec)` | Walks an OpenAPI 3.x spec; reports per-route schema complexity (`oneOf`/`allOf`/recursive `$ref`/etc.). |
@@ -325,11 +369,11 @@ export async function load({ fetch }) {
 
 | Export | Purpose |
 |---|---|
-| `fetcherPlugin(opts)` | Rollup/Vite plugin. Auto-generates `paths.d.ts`, provides `virtual:fetcher` module, watches spec during dev. |
+| `fetcherPlugin(opts)` | Rollup/Vite plugin. Auto-generates `paths.d.ts` (with `Schema` helper), provides `virtual:fetcher` module exporting route schemas, watches spec during dev. Optionally fetches spec from a remote URL. |
 
 ### Types
 
-`TypedFetchFn`, `TypedFetchPromise`, `TypedResponse`, `ResultData`, `FetcherError`, `FetcherErrorLocation`, `FetchConfig`, `Middleware`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `SchemaOf`, `StandardSchemaV1`, `BearerWithRefreshOptions`, `FetcherPlugin`, `FetcherPluginOptions`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, `InferRoutesFromSpec`, `InferOutput`.
+`TypedFetchFn`, `TypedFetchPromise`, `TypedResponse`, `ResultData`, `FetcherError`, `FetcherErrorLocation`, `FetchConfig`, `Middleware`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `SchemaOf`, `StandardSchemaV1`, `BearerWithRefreshOptions<Paths>`, `FetcherPluginOptions`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, `InferRoutesFromSpec`, `InferOutput`.
 
 See [`docs/architecture.md`](./docs/architecture.md) for implementation details.
 

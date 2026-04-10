@@ -56,7 +56,7 @@
  * @module
  */
 
-export { createFetch } from './fetcher.ts';
+export { createFetch, extractErrorMessage } from './fetcher.ts';
 export { JSONSchemaValidator, ValidationError } from './json-schema-validator.ts';
 export type { JSONSchemaDefinition } from './json-schema-validator.ts';
 export { authBearer, bearerWithRefresh, retry, timeout } from './middleware.ts';

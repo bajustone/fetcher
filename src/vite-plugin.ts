@@ -1,7 +1,7 @@
 /**
  * Rollup/Vite plugin for `@bajustone/fetcher` — auto-generates typed paths
- * from an OpenAPI spec and provides a virtual module with a pre-configured
- * client.
+ * from an OpenAPI spec and provides a virtual module with pre-built route
+ * schemas for runtime validation.
  *
  * **Rollup-compatible:** uses only standard Rollup hooks (`buildStart`,
  * `resolveId`, `load`) so it works in Vite, Rollup, SvelteKit, Astro, and
@@ -19,45 +19,34 @@
  *
  * export default defineConfig({
  *   plugins: [
- *     fetcherPlugin({
- *       spec: './openapi.json',
- *       baseUrl: 'https://api.example.com',
- *     }),
+ *     fetcherPlugin({ spec: './openapi.json' }),
  *   ],
  * });
  * ```
  *
  * Then in your app:
  * ```typescript
- * import { api } from 'virtual:fetcher';
+ * import { createFetch } from '@bajustone/fetcher';
+ * import type { paths } from './paths';
+ * import { routes } from 'virtual:fetcher';
  *
- * const result = await api.get('/pets').result();
+ * export const api = createFetch<paths>({
+ *   baseUrl: 'https://api.example.com',
+ *   routes,
+ *   middleware: [...],
+ * });
  * ```
  *
  * @module
  */
 
-import { execSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { extractRouteSchemas } from './openapi.ts';
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
-
-/**
- * The Rollup/Vite plugin object returned by {@link fetcherPlugin}.
- * Includes standard Rollup hooks (`buildStart`, `resolveId`, `load`) plus
- * the Vite-specific `configureServer` for dev-mode file watching.
- */
-export interface FetcherPlugin {
-  name: string;
-  buildStart: () => void;
-  resolveId: (source: string) => string | null;
-  load: (id: string) => string | null;
-  configureServer: (server: ViteDevServer) => void;
-}
 
 /** Configuration for {@link fetcherPlugin}. */
 export interface FetcherPluginOptions {
@@ -66,13 +55,17 @@ export interface FetcherPluginOptions {
    * (or absolute).
    */
   spec: string;
-  /** API base URL for the generated `api` client exported by `virtual:fetcher`. */
-  baseUrl: string;
   /**
    * Directory to emit generated files (`paths.d.ts` and `fetcher-env.d.ts`).
    * Defaults to the directory containing the spec file.
    */
   output?: string;
+  /**
+   * Remote URL to fetch the OpenAPI spec from. If set, the spec is
+   * downloaded and written to the `spec` path before generation.
+   * Falls back to the local file if the fetch fails.
+   */
+  url?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,33 +85,61 @@ const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_MODULE_ID}`;
  *
  * 1. **Generates `paths.d.ts`** from the OpenAPI spec via `openapi-typescript`
  *    (run at build start; re-run on spec change in Vite dev mode).
- * 2. **Provides `virtual:fetcher`** — a virtual module exporting a
- *    pre-configured `createFetch<paths>(...)` client so the user writes
- *    `import { api } from 'virtual:fetcher'` with zero boilerplate.
+ * 2. **Provides `virtual:fetcher`** — a virtual module exporting pre-built
+ *    route schemas for runtime validation. The user imports `routes` and
+ *    passes them to `createFetch` with their own middleware and config.
  *    Only the JSON Schema nodes needed for validation are inlined — the
  *    full OpenAPI spec is never shipped to the client bundle.
  * 3. **Emits `fetcher-env.d.ts`** — a module declaration that types the
- *    virtual module so TypeScript sees `api` as fully typed.
+ *    virtual module so TypeScript sees `routes` as `Routes`.
+ *
+ * @returns A Vite/Rollup-compatible plugin object. Typed as `any` to avoid
+ * requiring `vite` as a peer dependency — the object satisfies Vite's
+ * `Plugin` interface structurally.
  */
-export function fetcherPlugin(options: FetcherPluginOptions): FetcherPlugin {
-  const { spec, baseUrl } = options;
+export function fetcherPlugin(options: FetcherPluginOptions): any {
+  const { spec } = options;
   const specPath = resolve(spec);
   const outputDir = resolve(options.output ?? dirname(spec));
   const pathsDtsPath = resolve(outputDir, 'paths.d.ts');
   const envDtsPath = resolve(outputDir, 'fetcher-env.d.ts');
 
-  function generate(): void {
+  async function generate(): Promise<void> {
     mkdirSync(outputDir, { recursive: true });
-    runOpenAPITypeScript(specPath, pathsDtsPath);
-    emitEnvDeclaration(envDtsPath, baseUrl);
+
+    // If a remote URL is configured, fetch and cache the spec locally.
+    if (options.url) {
+      try {
+        const response = await globalThis.fetch(options.url);
+        if (!response.ok)
+          throw new Error(`HTTP ${response.status}`);
+        const body = await response.text();
+        JSON.parse(body); // Validate JSON before overwriting
+        writeFileSync(specPath, body);
+      }
+      catch (err) {
+        if (existsSync(specPath)) {
+          console.warn(`[fetcher] Failed to fetch spec from ${options.url}, using local file: ${err}`);
+        }
+        else {
+          throw new Error(
+            `[fetcher] Failed to fetch spec from ${options.url} and no local file exists at ${spec}: ${err}`,
+          );
+        }
+      }
+    }
+
+    await runOpenAPITypeScript(specPath, pathsDtsPath);
+    appendSchemaHelper(pathsDtsPath);
+    emitEnvDeclaration(envDtsPath);
   }
 
   return {
     name: 'fetcher',
 
     // Rollup hook: runs once at the start of each build.
-    buildStart() {
-      generate();
+    async buildStart() {
+      await generate();
     },
 
     // Rollup hook: intercept `import 'virtual:fetcher'`.
@@ -131,6 +152,8 @@ export function fetcherPlugin(options: FetcherPluginOptions): FetcherPlugin {
     // Rollup hook: provide the virtual module's source code.
     // Extracts only the JSON Schema nodes needed for validation at build
     // time — the full OpenAPI spec is never shipped to the client bundle.
+    // Exports `routes` (not a pre-built client) so the user controls
+    // middleware, baseUrl, and other config via their own `createFetch`.
     load(id: string) {
       if (id !== RESOLVED_VIRTUAL_ID)
         return null;
@@ -139,7 +162,7 @@ export function fetcherPlugin(options: FetcherPluginOptions): FetcherPlugin {
       const { definitions, routes } = extractRouteSchemas(rawSpec);
 
       return [
-        `import { createFetch, JSONSchemaValidator } from '@bajustone/fetcher';`,
+        `import { JSONSchemaValidator } from '@bajustone/fetcher';`,
         `const __defs = ${JSON.stringify(definitions)};`,
         `const __routes = ${JSON.stringify(routes)};`,
         `function __buildRoutes(extracted, defs) {`,
@@ -156,7 +179,7 @@ export function fetcherPlugin(options: FetcherPluginOptions): FetcherPlugin {
         `  }`,
         `  return r;`,
         `}`,
-        `export const api = createFetch({ baseUrl: '${baseUrl}', routes: __buildRoutes(__routes, __defs) });`,
+        `export const routes = __buildRoutes(__routes, __defs);`,
       ].join('\n');
     },
 
@@ -164,12 +187,12 @@ export function fetcherPlugin(options: FetcherPluginOptions): FetcherPlugin {
     // Rollup ignores this hook silently.
     configureServer(server: ViteDevServer) {
       server.watcher.add(specPath);
-      server.watcher.on('change', (changedPath: string) => {
+      server.watcher.on('change', async (changedPath: string) => {
         if (resolve(changedPath) !== specPath)
           return;
 
         try {
-          generate();
+          await generate();
           // Invalidate the virtual module so Vite serves fresh code.
           const mod = server.moduleGraph.getModuleById(RESOLVED_VIRTUAL_ID);
           if (mod)
@@ -191,53 +214,83 @@ export function fetcherPlugin(options: FetcherPluginOptions): FetcherPlugin {
 // ---------------------------------------------------------------------------
 
 /**
- * Runs `openapi-typescript` to generate `paths.d.ts`. The package is NOT a
- * dependency of `@bajustone/fetcher` — it must be installed in the user's
- * project as a dev dependency. If it's missing, a clear error is thrown.
+ * Generates `paths.d.ts` from the OpenAPI spec using the `openapi-typescript`
+ * programmatic API. The package is NOT a dependency of `@bajustone/fetcher` —
+ * it must be installed in the user's project as a dev dependency. If it's
+ * missing, a clear error is thrown.
  */
-function runOpenAPITypeScript(specPath: string, outputPath: string): void {
-  // Try the local binary first (fast — no resolution), then fall back to
-  // npx/bunx (resolves on the fly). This covers both "user installed it
-  // as a devDependency" and "user just has bun/npm available".
-  const commands = [
-    `openapi-typescript "${specPath}" -o "${outputPath}"`,
-    `bunx openapi-typescript "${specPath}" -o "${outputPath}"`,
-    `npx -y openapi-typescript "${specPath}" -o "${outputPath}"`,
-  ];
-
-  for (const cmd of commands) {
-    try {
-      execSync(cmd, { stdio: 'pipe' });
-      return;
+async function runOpenAPITypeScript(specPath: string, outputPath: string): Promise<void> {
+  let openapiTS: (schema: unknown) => Promise<string>;
+  try {
+    const mod = await import('openapi-typescript');
+    // openapi-typescript v7+ returns TypeScript AST nodes and provides
+    // astToString() to serialise them. Earlier versions returned a string
+    // directly. Support both shapes.
+    if (typeof mod.astToString === 'function') {
+      const astToString = mod.astToString as (ast: unknown) => string;
+      const rawFn = mod.default as unknown as (schema: unknown) => Promise<unknown>;
+      openapiTS = async (schema: unknown) => astToString(await rawFn(schema));
     }
-    catch {
-      // Try the next command.
+    else {
+      openapiTS = mod.default as unknown as (schema: unknown) => Promise<string>;
     }
   }
+  catch {
+    throw new Error(
+      '[fetcher] Could not import openapi-typescript. Install it as a dev dependency:\n\n'
+      + '  bun add -d openapi-typescript\n',
+    );
+  }
 
-  throw new Error(
-    '[fetcher] Could not run openapi-typescript. Install it as a dev dependency:\n\n'
-    + '  bun add -d openapi-typescript\n',
-  );
+  const specContent = JSON.parse(readFileSync(specPath, 'utf-8'));
+  const output = await openapiTS(specContent);
+  writeFileSync(outputPath, output);
+}
+
+/**
+ * Appends a pre-applied `Schema<Name>` type alias to the generated
+ * `paths.d.ts` so users can write `import type { Schema } from './paths'`
+ * instead of importing `SchemaOf` from `@bajustone/fetcher` and `components`
+ * from `./paths` separately. Only appended if the generated output contains
+ * a `components` interface (i.e. the spec has `components.schemas`).
+ */
+function appendSchemaHelper(pathsDtsPath: string): void {
+  const content = readFileSync(pathsDtsPath, 'utf-8');
+  if (!content.includes('components'))
+    return;
+
+  const helper = [
+    ``,
+    `// --- Added by @bajustone/fetcher plugin ---`,
+    `import type { SchemaOf } from '@bajustone/fetcher';`,
+    `/** Pre-applied SchemaOf — use \`Schema<'Pet'>\` instead of \`SchemaOf<components, 'Pet'>\`. */`,
+    `export type Schema<Name extends string> = SchemaOf<components, Name>;`,
+    ``,
+  ].join('\n');
+
+  appendFileSync(pathsDtsPath, helper);
 }
 
 /**
  * Emits `fetcher-env.d.ts` — a module declaration that types the
- * `virtual:fetcher` virtual module. The user should include this file in
- * their `tsconfig.json` `include` array (or it lands there automatically
- * if the output dir is inside `src/`).
+ * `virtual:fetcher` virtual module. The declaration exports `routes` as
+ * `Routes` — a standalone type from `@bajustone/fetcher` with no relative
+ * imports, eliminating the `declare module` + relative path fragility that
+ * affected SvelteKit and other frameworks.
+ *
+ * The user should include this file in their `tsconfig.json` `include`
+ * array (or it lands there automatically if the output dir is inside `src/`).
  */
-function emitEnvDeclaration(envDtsPath: string, baseUrl: string): void {
+function emitEnvDeclaration(envDtsPath: string): void {
   const content = [
     `// Auto-generated by @bajustone/fetcher plugin — do not edit.`,
     `// Provides type declarations for the virtual:fetcher module.`,
     `// Make sure this file is included in your tsconfig.json.`,
     ``,
     `declare module 'virtual:fetcher' {`,
-    `  import type { paths } from './paths';`,
-    `  import type { Routes, TypedFetchFn } from '@bajustone/fetcher';`,
-    `  /** Pre-configured typed fetch client. Base URL: \`${baseUrl}\` */`,
-    `  export const api: TypedFetchFn<Routes, paths>;`,
+    `  import type { Routes } from '@bajustone/fetcher';`,
+    `  /** Pre-built route schemas for runtime validation. */`,
+    `  export const routes: Routes;`,
     `}`,
     ``,
   ].join('\n');

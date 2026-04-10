@@ -427,3 +427,32 @@ function interpolatePath(
     return encodeURIComponent(value);
   });
 }
+
+/**
+ * Extracts a human-readable error message from a {@link FetcherError}.
+ * Handles all three error kinds so consumers don't need to write their
+ * own switch/case boilerplate.
+ *
+ * - `'network'` — returns `cause.message` if `cause` is an `Error`, otherwise `String(cause)`
+ * - `'validation'` — joins all issue messages with `, `
+ * - `'http'` — looks for `body.error.message` or `body.message` (common API patterns), falls back to `HTTP {status}`
+ */
+export function extractErrorMessage(error: FetcherError): string {
+  switch (error.kind) {
+    case 'network':
+      return error.cause instanceof Error ? error.cause.message : String(error.cause);
+    case 'validation':
+      return error.issues.map(i => i.message).join(', ');
+    case 'http': {
+      if (typeof error.body === 'object' && error.body !== null) {
+        const b = error.body as Record<string, unknown>;
+        const msg = b.error && typeof b.error === 'object'
+          ? (b.error as Record<string, unknown>).message
+          : b.message;
+        if (typeof msg === 'string')
+          return msg;
+      }
+      return `HTTP ${error.status}`;
+    }
+  }
+}

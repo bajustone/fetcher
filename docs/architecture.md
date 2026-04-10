@@ -17,7 +17,7 @@
 ### Mode 1: OpenAPI (hybrid type/runtime workflow)
 
 ```typescript
-import { api } from 'virtual:fetcher';
+import { api } from '$lib/api'; // user-created client using routes from virtual:fetcher
 
 const result = await api.get('/pets/{petId}', { params: { petId: '42' } }).result();
 if (result.ok) {
@@ -178,6 +178,7 @@ src/
 - `fetchFn` — wraps `rawFetchFn` to attach `.result()` on the returned promise (producing a `TypedFetchPromise`).
 - Method shortcuts (`.get`, `.post`, `.put`, `.delete`, `.patch`) delegate to `fetchFn`.
 - `.with(overrides)` — forks the client with shallow-merged config, preserving both `R` and `OAS` generics.
+- `extractErrorMessage(error)` — standalone utility that extracts a human-readable string from any `FetcherError`. Handles all three error kinds: network (unwraps `cause`), validation (joins issue messages), http (extracts `body.message` or `body.error.message`, falls back to `HTTP {status}`).
 
 ### json-schema-validator.ts
 - Lightweight JSON Schema validator implementing **Standard Schema V1** via the `~standard` property.
@@ -225,17 +226,19 @@ The validator covers a deliberately small slice of JSON Schema — enough for we
 - Single recursive visitor shared between both functions; zero runtime dependencies.
 
 ### vite-plugin.ts
-- `fetcherPlugin(options)` — Rollup/Vite plugin, exported as `@bajustone/fetcher/vite`.
-- **Rollup hooks:** `buildStart` (runs `openapi-typescript` to generate `paths.d.ts` + emits `fetcher-env.d.ts`), `resolveId` + `load` (virtual module `virtual:fetcher` providing a pre-configured typed client).
+- `fetcherPlugin(options)` — Rollup/Vite plugin, exported as `@bajustone/fetcher/vite`. Returns `any` to avoid requiring `vite` as a peer dependency.
+- **Options:** `spec` (path to OpenAPI JSON), `output?` (directory for generated files), `url?` (remote URL to fetch the spec from — fetches and caches locally at build start, falls back to local file on failure).
+- **Rollup hooks:** `buildStart` (async — uses the `openapi-typescript` programmatic API to generate `paths.d.ts`, appends a `Schema<Name>` helper if `components` exist, emits `fetcher-env.d.ts`), `resolveId` + `load` (virtual module `virtual:fetcher` exporting pre-built route schemas as `routes`).
+- **Virtual module design:** exports `routes` (not a pre-built client). The user imports `routes` and passes them to `createFetch` with their own middleware, baseUrl, and config. This follows the industry pattern (openapi-fetch, zodios, Hono RPC) of separating schema generation from client construction.
 - **Vite-specific hook:** `configureServer` (watches the spec file, regenerates on change, invalidates the virtual module, triggers full reload).
-- Dynamically imports `openapi-typescript` — it must be installed in the user's project as a devDependency. Tries local binary, then `bunx`, then `npx -y`. Clear error if none work.
-- `fetcher-env.d.ts` declares the `virtual:fetcher` module type, referencing the generated `paths.d.ts`.
+- Dynamically imports `openapi-typescript` — it must be installed in the user's project as a devDependency. Supports both v7+ (AST-based, uses `astToString`) and earlier versions (string output). Clear error if not importable.
+- `fetcher-env.d.ts` declares the `virtual:fetcher` module type with `export const routes: Routes` — no relative imports, eliminating the `declare module` + relative path fragility that affected SvelteKit and other frameworks.
 
 ### middleware.ts
 - `Middleware` — `(request, next) => Promise<Response>`. `next` accepts an optional `Request` argument for replay.
 - `executeMiddleware` — recursive dispatcher. Calling `next` more than once re-runs every downstream middleware and the final fetch.
 - Built-in middlewares:
   - `authBearer(getToken)` — attaches `Authorization: Bearer <token>`.
-  - `bearerWithRefresh(opts)` — bearer auth + 401-refresh-retry with concurrent-401 dedup. The `exclude` field lists endpoints that skip auth entirely (login, logout, refresh, etc.). The deprecated `refreshEndpoint` field is kept for backwards compatibility; `exclude` takes precedence when both are supplied.
+  - `bearerWithRefresh<Paths>(opts)` — bearer auth + 401-refresh-retry with concurrent-401 dedup. The `exclude` field lists endpoints that skip auth entirely (login, logout, refresh, etc.) and is typed against the `Paths` generic — when the user passes their `paths` interface (e.g. `bearerWithRefresh<paths>({...})`), `exclude` gets autocomplete and compile-time typo checking. Defaults to `Record<string, unknown>` for backwards compatibility. The deprecated `refreshEndpoint` field is kept for backwards compatibility; `exclude` takes precedence when both are supplied.
   - `timeout(ms)` — aborts via `AbortSignal.timeout(ms)` merged with the user's signal.
   - `retry(opts)` — re-invokes the chain on retryable failures (configurable status set, exponential backoff with jitter, honors `Retry-After`, clones request body between attempts).

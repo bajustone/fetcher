@@ -45,7 +45,7 @@ export function authBearer(
 /**
  * Configuration for {@link bearerWithRefresh}.
  */
-export interface BearerWithRefreshOptions {
+export interface BearerWithRefreshOptions<Paths = Record<string, unknown>> {
   /**
    * Returns the current access token (or `null` if none is cached). Called
    * before every outgoing request. May be sync or async.
@@ -80,8 +80,8 @@ export interface BearerWithRefreshOptions {
    * Supersedes the deprecated {@link refreshEndpoint} when both are supplied.
    */
   exclude?:
-    | string
-    | string[]
+    | (keyof Paths & string)
+    | Array<keyof Paths & string>
     | RegExp
     | ((request: Request) => boolean);
   /**
@@ -136,7 +136,7 @@ export interface BearerWithRefreshOptions {
  * });
  * ```
  */
-export function bearerWithRefresh(opts: BearerWithRefreshOptions): Middleware {
+export function bearerWithRefresh<Paths = Record<string, unknown>>(opts: BearerWithRefreshOptions<Paths>): Middleware {
   const { getToken, refresh, exclude, refreshEndpoint } = opts;
 
   // Shared in-flight refresh promise. Concurrent 401s await this same

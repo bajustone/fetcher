@@ -26,7 +26,6 @@ describe('fetcherPlugin', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-test-'));
     plugin = fetcherPlugin({
       spec: SPEC_PATH,
-      baseUrl: 'https://api.example.com',
       output: tmpDir,
     });
   });
@@ -36,9 +35,8 @@ describe('fetcherPlugin', () => {
   });
 
   describe('buildStart', () => {
-    it('generates paths.d.ts from the petstore fixture', () => {
-      // buildStart is synchronous in our implementation (execSync).
-      (plugin.buildStart as () => void)();
+    it('generates paths.d.ts from the petstore fixture', async () => {
+      await (plugin.buildStart as () => Promise<void>)();
 
       const pathsDts = join(tmpDir, 'paths.d.ts');
       expect(existsSync(pathsDts)).toBe(true);
@@ -59,9 +57,10 @@ describe('fetcherPlugin', () => {
 
       const content = readFileSync(envDts, 'utf-8');
       expect(content).toContain('declare module \'virtual:fetcher\'');
-      expect(content).toContain('import type { paths } from \'./paths\'');
-      expect(content).toContain('TypedFetchFn');
-      expect(content).toContain('https://api.example.com');
+      expect(content).toContain('import type { Routes } from \'@bajustone/fetcher\'');
+      expect(content).toContain('export const routes: Routes');
+      // No relative paths import — eliminates SvelteKit fragility
+      expect(content).not.toContain('from \'./paths\'');
     });
   });
 
@@ -81,10 +80,13 @@ describe('fetcherPlugin', () => {
     it('returns the virtual module code for the resolved virtual ID', () => {
       const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher');
       expect(code).not.toBeNull();
-      expect(code).toContain('import { createFetch, JSONSchemaValidator } from \'@bajustone/fetcher\'');
-      expect(code).toContain('baseUrl: \'https://api.example.com\'');
-      expect(code).toContain('export const api');
+      expect(code).toContain('import { JSONSchemaValidator } from \'@bajustone/fetcher\'');
+      expect(code).toContain('export const routes');
       expect(code).toContain('__buildRoutes');
+      // Should NOT contain a pre-built client — user creates their own
+      expect(code).not.toContain('createFetch');
+      expect(code).not.toContain('export const api');
+      expect(code).not.toContain('baseUrl');
     });
 
     it('does not import the full spec JSON', () => {

@@ -1,6 +1,6 @@
-import type { FetchFn, Schema } from '../src/types.ts';
+import type { FetcherError, FetchFn, Schema } from '../src/types.ts';
 import { describe, expect, it } from 'bun:test';
-import { createFetch } from '../src/fetcher.ts';
+import { createFetch, extractErrorMessage } from '../src/fetcher.ts';
 import { authBearer } from '../src/middleware.ts';
 
 /** Helper to create a mock fetch that returns a JSON response */
@@ -1025,5 +1025,62 @@ describe('createFetch', () => {
         throw new Error('expected kind:validation location:body');
       }
     });
+  });
+});
+
+describe('extractErrorMessage', () => {
+  it('returns cause.message for network errors with Error cause', () => {
+    const error: FetcherError = {
+      kind: 'network',
+      cause: new Error('connection refused'),
+    };
+    expect(extractErrorMessage(error)).toBe('connection refused');
+  });
+
+  it('returns String(cause) for network errors with non-Error cause', () => {
+    const error: FetcherError = {
+      kind: 'network',
+      cause: 'something went wrong',
+    };
+    expect(extractErrorMessage(error)).toBe('something went wrong');
+  });
+
+  it('joins issue messages for validation errors', () => {
+    const error: FetcherError = {
+      kind: 'validation',
+      location: 'body',
+      issues: [
+        { message: 'email required' },
+        { message: 'name must be string' },
+      ],
+    };
+    expect(extractErrorMessage(error)).toBe('email required, name must be string');
+  });
+
+  it('returns body.message for HTTP errors', () => {
+    const error: FetcherError = {
+      kind: 'http',
+      status: 404,
+      body: { message: 'Resource not found' },
+    };
+    expect(extractErrorMessage(error)).toBe('Resource not found');
+  });
+
+  it('returns body.error.message for nested HTTP error messages', () => {
+    const error: FetcherError = {
+      kind: 'http',
+      status: 422,
+      body: { error: { message: 'Validation failed' } },
+    };
+    expect(extractErrorMessage(error)).toBe('Validation failed');
+  });
+
+  it('falls back to HTTP {status} when body has no message', () => {
+    const error: FetcherError = {
+      kind: 'http',
+      status: 500,
+      body: { code: 'INTERNAL' },
+    };
+    expect(extractErrorMessage(error)).toBe('HTTP 500');
   });
 });
