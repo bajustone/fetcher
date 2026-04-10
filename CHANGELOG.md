@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.12] - 2026-04-10
+
+### Added
+- feat: add .unwrap() and .query() primitives on TypedFetchPromise
+
 ## [0.0.11] - 2026-04-10
 
 ### Changed
