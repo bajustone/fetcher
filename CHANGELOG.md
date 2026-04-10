@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.10] - 2026-04-10
+
+### Fixed
+- fix: vite plugin no longer ships full OpenAPI spec in bundle
+
 ## [0.0.9] - 2026-04-10
 
 ### Added
