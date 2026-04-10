@@ -103,10 +103,12 @@ export type {
   RouteDefinition,
   Routes,
   Schema,
+  SchemaOf,
   StandardSchemaV1,
   StandardSchemaV1Issue,
   StandardSchemaV1PathSegment,
   StandardSchemaV1Result,
   TypedFetchFn,
+  TypedFetchPromise,
   TypedResponse,
 } from './types.ts';

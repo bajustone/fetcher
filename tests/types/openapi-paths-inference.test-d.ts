@@ -18,7 +18,8 @@
  */
 /* eslint-disable unused-imports/no-unused-vars, ts/explicit-function-return-type */
 
-import type { ResultData, TypedResponse } from '../../src/types.ts';
+import type { ResultData, SchemaOf, TypedResponse } from '../../src/types.ts';
+import type { components } from '../fixtures/petstore-paths.d.ts';
 import { createFetch } from '../../src/fetcher.ts';
 
 // ---------------------------------------------------------------------------
@@ -254,4 +255,27 @@ export type Case_UnknownMethod = Verify<
     Awaited<ReturnType<typeof unknownMethodOnKnownPath>>,
     TypedResponse<unknown>
   >
+>;
+
+// ---------------------------------------------------------------------------
+// SchemaOf utility type — extracts a named component schema
+// ---------------------------------------------------------------------------
+
+export type Case_SchemaOf_Pet = Verify<
+  Equal<
+    SchemaOf<components, 'Pet'>,
+    { id: number; name: string; tag?: string }
+  >
+>;
+
+export type Case_SchemaOf_Error = Verify<
+  Equal<
+    SchemaOf<components, 'Error'>,
+    { code: number; message: string }
+  >
+>;
+
+/** Non-existent schema → `never`. */
+export type Case_SchemaOf_Missing = Verify<
+  Equal<SchemaOf<components, 'Nope'>, never>
 >;

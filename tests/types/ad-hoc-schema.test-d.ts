@@ -121,3 +121,21 @@ export type Case3b = Verify<
     TypedResponse<{ wrapped: string }, unknown>
   >
 >;
+
+/**
+ * Case 4 — `.result()` on the promise returns `Promise<ResultData<T>>`.
+ * This validates the `TypedFetchPromise` shorthand.
+ */
+function case4ChainedResult() {
+  return f('/anything', {
+    method: 'GET',
+    responseSchema: s<{ id: string; name: string }>(),
+  }).result();
+}
+
+export type Case4 = Verify<
+  Equal<
+    Awaited<ReturnType<typeof case4ChainedResult>>,
+    import('../../src/types.ts').ResultData<{ id: string; name: string }>
+  >
+>;

@@ -119,6 +119,57 @@ describe('createFetch', () => {
     });
   });
 
+  describe('promise .result() shorthand', () => {
+    it('resolves to the same ResultData as the two-await form', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ id: 1, name: 'Rex' }),
+      });
+
+      // Two-await form (existing)
+      const response = await f('/pets', { method: 'GET' });
+      const twoAwait = await response.result();
+
+      // One-await form (new)
+      const oneAwait = await f('/pets', { method: 'GET' }).result();
+
+      expect(oneAwait).toEqual(twoAwait);
+      expect(oneAwait.ok).toBe(true);
+      if (oneAwait.ok)
+        expect(oneAwait.data).toEqual({ id: 1, name: 'Rex' });
+    });
+
+    it('works with method shortcuts', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ count: 42 }),
+      });
+
+      const result = await f.get('/count').result();
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.data).toEqual({ count: 42 });
+    });
+
+    it('surfaces errors through the shorthand', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: async () => new Response(JSON.stringify({ error: 'not found' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        }),
+      });
+
+      const result = await f.get('/missing').result();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe('http');
+        if (result.error.kind === 'http')
+          expect(result.error.status).toBe(404);
+      }
+    });
+  });
+
   describe('path parameters', () => {
     it('interpolates path params', async () => {
       let capturedUrl = '';

@@ -334,4 +334,63 @@ describe('bearerWithRefresh', () => {
     if (!result.ok && result.error.kind === 'http')
       expect(result.error.status).toBe(401);
   });
+
+  it('exclude: skips auth for all listed paths', async () => {
+    const authHeaders: Record<string, string | null> = {};
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      middleware: [
+        bearerWithRefresh({
+          getToken: () => 'my-token',
+          refresh: async () => 'refreshed',
+          exclude: ['/auth/login', '/auth/logout', '/auth/refresh'],
+        }),
+      ],
+      fetch: async (req) => {
+        const path = new URL(req.url).pathname;
+        authHeaders[path] = req.headers.get('authorization');
+        return jsonResponse({ ok: true });
+      },
+    });
+
+    await f('/auth/login', { method: 'POST', body: {} });
+    await f('/auth/logout', { method: 'POST' });
+    await f('/auth/refresh', { method: 'POST' });
+    await f('/users', { method: 'GET' });
+
+    // Excluded paths get no auth header
+    expect(authHeaders['/auth/login']).toBeNull();
+    expect(authHeaders['/auth/logout']).toBeNull();
+    expect(authHeaders['/auth/refresh']).toBeNull();
+    // Non-excluded path gets the token
+    expect(authHeaders['/users']).toBe('Bearer my-token');
+  });
+
+  it('exclude supersedes refreshEndpoint when both are supplied', async () => {
+    const authHeaders: Record<string, string | null> = {};
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      middleware: [
+        bearerWithRefresh({
+          getToken: () => 'my-token',
+          refresh: async () => 'refreshed',
+          refreshEndpoint: '/auth/refresh',
+          exclude: ['/auth/login', '/auth/refresh'],
+        }),
+      ],
+      fetch: async (req) => {
+        const path = new URL(req.url).pathname;
+        authHeaders[path] = req.headers.get('authorization');
+        return jsonResponse({ ok: true });
+      },
+    });
+
+    await f('/auth/login', { method: 'POST', body: {} });
+    await f('/auth/refresh', { method: 'POST' });
+    await f('/protected', { method: 'GET' });
+
+    expect(authHeaders['/auth/login']).toBeNull();
+    expect(authHeaders['/auth/refresh']).toBeNull();
+    expect(authHeaders['/protected']).toBe('Bearer my-token');
+  });
 });

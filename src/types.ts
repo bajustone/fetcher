@@ -167,6 +167,29 @@ export interface TypedResponse<T = unknown, HttpErrorBody = unknown> extends Res
   result: () => Promise<ResultData<T, HttpErrorBody>>;
 }
 
+/**
+ * The promise returned by {@link TypedFetchFn} and its method shortcuts.
+ * Extends the native `Promise<TypedResponse>` with a `.result()` shorthand
+ * so callers can collapse two awaits into one:
+ *
+ * ```typescript
+ * // Before (still works):
+ * const response = await f.get('/pets');
+ * const result = await response.result();
+ *
+ * // After:
+ * const result = await f.get('/pets').result();
+ * ```
+ *
+ * `.result()` on the promise is equivalent to `.then(r => r.result())` —
+ * it resolves to the same {@link ResultData} discriminated union.
+ */
+export type TypedFetchPromise<T = unknown, HttpErrorBody = unknown>
+  = Promise<TypedResponse<T, HttpErrorBody>> & {
+    /** Shorthand: resolves directly to `ResultData<T, HttpErrorBody>`. */
+    result: () => Promise<ResultData<T, HttpErrorBody>>;
+  };
+
 // ---------------------------------------------------------------------------
 // Route definitions
 // ---------------------------------------------------------------------------
@@ -475,6 +498,29 @@ export type ResolveErrorResponseFor<R extends Routes, OAS, P extends string, M e
     : ResolveErrorResponse<R, P, M>;
 
 // ---------------------------------------------------------------------------
+// Schema extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts a named component schema from an `openapi-typescript`-generated
+ * `components` interface. Saves consumers from writing the full path
+ * `components['schemas']['Name']` at every type reference.
+ *
+ * @example
+ * ```typescript
+ * import type { SchemaOf } from '@bajustone/fetcher';
+ * import type { components } from './generated/petstore-paths';
+ *
+ * type Pet = SchemaOf<components, 'Pet'>;
+ * //   ^? { id: number; name: string; tag?: string }
+ * ```
+ */
+export type SchemaOf<Components, Name extends string>
+  = Components extends { schemas: infer S }
+    ? Name extends keyof S ? S[Name] : never
+    : never;
+
+// ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
 
@@ -750,13 +796,13 @@ export type MethodShortcutFn<
   options?: IsTypedCall<R, OAS, P, M> extends true
     ? Omit<TypedFetchOptions<R, P, M, AdHoc, OAS>, 'method'>
     : Omit<UntypedFetchOptions<AdHoc>, 'method'>,
-) => Promise<
+) => TypedFetchPromise<
   IsTypedCall<R, OAS, P, M> extends true
-    ? TypedResponse<
-      ResolveAdHocResponse<AdHoc, ResolveResponseFor<R, OAS, P, M>>,
-      ResolveErrorResponseFor<R, OAS, P, M>
-    >
-    : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+    ? ResolveAdHocResponse<AdHoc, ResolveResponseFor<R, OAS, P, M>>
+    : ResolveAdHocResponse<AdHoc, unknown>,
+  IsTypedCall<R, OAS, P, M> extends true
+    ? ResolveErrorResponseFor<R, OAS, P, M>
+    : unknown
 >;
 
 /**
@@ -784,13 +830,13 @@ export interface TypedFetchFn<R extends Routes, OAS = unknown> {
     options: IsTypedCall<R, OAS, P, M> extends true
       ? TypedFetchOptions<R, P, M, AdHoc, OAS>
       : UntypedFetchOptions<AdHoc>,
-  ): Promise<
+  ): TypedFetchPromise<
     IsTypedCall<R, OAS, P, M> extends true
-      ? TypedResponse<
-        ResolveAdHocResponse<AdHoc, ResolveResponseFor<R, OAS, P, M>>,
-        ResolveErrorResponseFor<R, OAS, P, M>
-      >
-      : TypedResponse<ResolveAdHocResponse<AdHoc, unknown>>
+      ? ResolveAdHocResponse<AdHoc, ResolveResponseFor<R, OAS, P, M>>
+      : ResolveAdHocResponse<AdHoc, unknown>,
+    IsTypedCall<R, OAS, P, M> extends true
+      ? ResolveErrorResponseFor<R, OAS, P, M>
+      : unknown
   >;
 
   /**

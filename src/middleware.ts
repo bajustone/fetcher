@@ -68,17 +68,27 @@ export interface BearerWithRefreshOptions {
    */
   refresh: () => Promise<string>;
   /**
-   * Identifies endpoints that must NOT trigger the 401-refresh loop —
-   * the refresh endpoint itself, plus any other auth endpoints (login,
-   * logout, password-reset, etc.) that legitimately return 401 and would
-   * otherwise deadlock the loop.
+   * Endpoints that should skip bearer auth entirely — no `Authorization`
+   * header, no 401-refresh logic. Typically the login, logout, and refresh
+   * endpoints.
    *
    * - `string`: exact pathname match
    * - `string[]`: any of the listed pathnames
    * - `RegExp`: tested against `request.url`
    * - `(req) => boolean`: arbitrary predicate
+   *
+   * Supersedes the deprecated {@link refreshEndpoint} when both are supplied.
    */
-  refreshEndpoint:
+  exclude?:
+    | string
+    | string[]
+    | RegExp
+    | ((request: Request) => boolean);
+  /**
+   * @deprecated Use {@link exclude} instead. Kept for backwards compatibility.
+   * When both `exclude` and `refreshEndpoint` are supplied, `exclude` wins.
+   */
+  refreshEndpoint?:
     | string
     | string[]
     | RegExp
@@ -127,7 +137,7 @@ export interface BearerWithRefreshOptions {
  * ```
  */
 export function bearerWithRefresh(opts: BearerWithRefreshOptions): Middleware {
-  const { getToken, refresh, refreshEndpoint } = opts;
+  const { getToken, refresh, exclude, refreshEndpoint } = opts;
 
   // Shared in-flight refresh promise. Concurrent 401s await this same
   // promise so only one refresh runs at a time. Cleared when refresh
@@ -143,9 +153,10 @@ export function bearerWithRefresh(opts: BearerWithRefreshOptions): Middleware {
   };
 
   return async (request, next) => {
-    // If this IS the refresh endpoint, skip the 401-handling logic to
-    // avoid deadlock (refresh failing would loop forever otherwise).
-    if (matchesRefreshEndpoint(request, refreshEndpoint))
+    // Skip auth entirely for excluded endpoints (login, logout, refresh,
+    // etc.). `exclude` supersedes the deprecated `refreshEndpoint`.
+    const matcher = exclude ?? refreshEndpoint;
+    if (matcher && matchesExclude(request, matcher))
       return next(request);
 
     // First attempt: attach the current token (if any).
@@ -168,9 +179,9 @@ export function bearerWithRefresh(opts: BearerWithRefreshOptions): Middleware {
   };
 }
 
-function matchesRefreshEndpoint(
+function matchesExclude(
   request: Request,
-  matcher: BearerWithRefreshOptions['refreshEndpoint'],
+  matcher: NonNullable<BearerWithRefreshOptions['exclude']>,
 ): boolean {
   if (typeof matcher === 'function')
     return matcher(request);

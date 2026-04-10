@@ -63,7 +63,7 @@ export function createFetch<
     retry: configRetry,
   } = config;
 
-  const fetchFn = async (path: string, options: Record<string, unknown> = {}): Promise<TypedResponse> => {
+  const rawFetchFn = async (path: string, options: Record<string, unknown> = {}): Promise<TypedResponse> => {
     const {
       method = 'GET',
       body,
@@ -247,6 +247,16 @@ export function createFetch<
 
     // Wrap the response with .result()
     return wrapResponse(response, responseSchema, errorResponseSchema);
+  };
+
+  // Wrap rawFetchFn so every returned promise has a `.result()` shorthand.
+  // This lets callers write `await f.get('/path').result()` instead of the
+  // two-await `const r = await f.get('/path'); await r.result()`.
+  const fetchFn = (path: string, options: Record<string, unknown> = {}): any => {
+    const promise = rawFetchFn(path, options);
+    return Object.assign(promise, {
+      result: () => promise.then((r: TypedResponse) => r.result()),
+    });
   };
 
   // Cast to the rich interface; properties below are attached imperatively.
