@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.9] - 2026-04-10
+
+### Added
+- add Rollup/Vite plugin; rewrite docs to match source
+
 ## [0.0.8] - 2026-04-10
 
 ### Added
