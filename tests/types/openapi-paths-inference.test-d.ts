@@ -18,9 +18,13 @@
  */
 /* eslint-disable unused-imports/no-unused-vars, ts/explicit-function-return-type */
 
-import type { ResultData, SchemaOf, TypedResponse } from '../../src/types.ts';
+import type { ResolveParamsFromPaths, ResolveQueryFromPaths, ResultData, SchemaOf, TypedResponse } from '../../src/types.ts';
 import type { components } from '../fixtures/petstore-paths.d.ts';
 import { createFetch } from '../../src/fetcher.ts';
+
+// ---------------------------------------------------------------------------
+// Query parameter inference (D7)
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Equal / Verify helpers
@@ -279,3 +283,37 @@ export type Case_SchemaOf_Error = Verify<
 export type Case_SchemaOf_Missing = Verify<
   Equal<SchemaOf<components, 'Nope'>, never>
 >;
+
+/**
+ * Case 7 — `GET /pets` has `parameters.query.limit?: number`.
+ * The resolved query type should be `{ limit?: number }`.
+ */
+export type Case_QueryType_ListPets = Verify<
+  Equal<ResolveQueryFromPaths<paths, '/pets', 'get'>, { limit?: number }>
+>;
+
+/**
+ * Case 8 — `GET /pets/{petId}` has `parameters.path.petId: string`.
+ * The resolved params type should be `{ petId: string }`.
+ */
+export type Case_ParamsType_GetPet = Verify<
+  Equal<ResolveParamsFromPaths<paths, '/pets/{petId}', 'get'>, { petId: string }>
+>;
+
+/**
+ * Case 9 — `POST /pets` has no query parameters declared.
+ * The resolved query type should be `never`.
+ */
+export type Case_QueryType_CreatePet = Verify<
+  Equal<ResolveQueryFromPaths<paths, '/pets', 'post'>, never>
+>;
+
+/**
+ * Case 10 — `f('/pets', { method: 'GET', query: { limit: 5 } })` compiles
+ * with typed query params. This is a compile-time assertion — if the query
+ * type were wrong, this function would fail to compile.
+ */
+function listPetsWithQuery() {
+  return f('/pets', { method: 'GET', query: { limit: 5 } });
+}
+void listPetsWithQuery;

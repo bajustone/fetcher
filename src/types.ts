@@ -449,6 +449,28 @@ export type ResolveBodyFromPaths<P, Path extends string, M extends string>
     : never;
 
 /**
+ * Resolves the query parameter type from a generated `paths` interface.
+ * Returns `never` when no query parameters are declared.
+ */
+export type ResolveQueryFromPaths<P, Path extends string, M extends string>
+  = OpenAPIOperation<P, Path, M> extends { parameters: infer Params }
+    ? Params extends { query?: infer Q }
+      ? Q & {}
+      : never
+    : never;
+
+/**
+ * Resolves the path parameter type from a generated `paths` interface.
+ * Returns `never` when no path parameters are declared.
+ */
+export type ResolveParamsFromPaths<P, Path extends string, M extends string>
+  = OpenAPIOperation<P, Path, M> extends { parameters: infer Params }
+    ? Params extends { path?: infer Q }
+      ? Q & {}
+      : never
+    : never;
+
+/**
  * True when `OAS` carries any path entries — i.e. the caller supplied a
  * generated `paths` interface as the OAS generic on `createFetch`. Used as
  * the switch between Routes-based and OAS-based inference.
@@ -509,6 +531,34 @@ export type ResolveBodyFor<R extends Routes, OAS, P extends string, M extends st
   = HasPaths<OAS> extends true
     ? ResolveBodyFromPaths<OAS, P, M>
     : ResolveBody<R, P, M>;
+
+/**
+ * Unified query resolver — prefers the OAS path when supplied, falls back
+ * to the Routes-based {@link ResolveQuery}. Returns `never` when neither
+ * source declares query params, which keeps `query` as a generic Record.
+ */
+export type ResolveQueryFor<R extends Routes, OAS, P extends string, M extends string>
+  = HasPaths<OAS> extends true
+    ? ResolveQueryFromPaths<OAS, P, M>
+    : ResolveQuery<R, P, M>;
+
+/**
+ * Unified path-params resolver — prefers OAS `parameters.path` when
+ * supplied, falls back to {@link ExtractPathParams} template extraction.
+ * Returns `never` when neither source declares path params.
+ */
+export type ResolveParamsFor<R extends Routes, OAS, P extends string, M extends string>
+  = HasPaths<OAS> extends true
+    ? [ResolveParamsFromPaths<OAS, P, M>] extends [never]
+        ? [ExtractPathParams<P>] extends [never]
+            ? never
+            : Record<ExtractPathParams<P>, string>
+        : ResolveParamsFromPaths<OAS, P, M>
+    : R extends Routes
+      ? [ExtractPathParams<P>] extends [never]
+          ? never
+          : Record<ExtractPathParams<P>, string>
+      : never;
 
 /**
  * Unified success-response resolver — prefers OAS, falls back to Routes,
@@ -727,6 +777,22 @@ export type ResolveBody<
   : never;
 
 /**
+ * Resolves the query parameter type for a given path + method from a
+ * {@link Routes} table. Returns `never` when no `query` schema exists.
+ */
+export type ResolveQuery<
+  R extends Routes,
+  P extends string,
+  M extends string,
+> = P extends keyof R
+  ? M extends keyof R[P]
+    ? R[P][M] extends { query: Schema<infer T> }
+      ? T
+      : never
+    : never
+  : never;
+
+/**
  * Resolves the response type for a single call when an ad-hoc
  * `responseSchema` is supplied. If the call passes a schema, its inferred
  * output wins; otherwise the type falls back to `FromRoute` (which is
@@ -786,12 +852,12 @@ export type TypedFetchOptions<
 } & (ResolveBodyFor<R, OAS, P, M> extends never
   ? { body?: unknown }
   : { body: ResolveBodyFor<R, OAS, P, M> })
-& ([ExtractPathParams<P>] extends [never]
+& (ResolveParamsFor<R, OAS, P, M> extends never
   ? { params?: undefined }
-  : { params: Record<ExtractPathParams<P>, string> }) & {
-    /** Query string object. Values are coerced to strings; `undefined`/`null` are dropped. */
-    query?: Record<string, string | number | boolean | undefined>;
-  };
+  : { params: ResolveParamsFor<R, OAS, P, M> })
+& (ResolveQueryFor<R, OAS, P, M> extends never
+  ? { /** Query string object. Values are coerced to strings; `undefined`/`null` are dropped. */ query?: Record<string, string | number | boolean | undefined> }
+  : { /** Typed query parameters from the route definition. */ query?: ResolveQueryFor<R, OAS, P, M> });
 
 /**
  * Untyped fetch options accepted when the caller uses a path or method that
