@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.14] - 2026-04-11
+
+### Fixed
+- fix url query
+
 ## [0.0.13] - 2026-04-10
 
 ### Changed
