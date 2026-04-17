@@ -10,8 +10,8 @@
 2. **Standard Schema V1** — Any schema implementing the [Standard Schema V1](https://standardschema.dev) spec (Zod 3.24+, Valibot, ArkType, the bundled schema builder under `./schema`, or any value with a `~standard.validate` property) works out of the box.
 3. **Zero runtime deps** — Ships a native schema builder and a raw-JSON-Schema bridge. No external dependencies.
 4. **Subpath-split for bundle discipline** — Core is ~2.7 KB gzipped. OpenAPI, dev-time spec tools, and the schema builder live in opt-in subpaths.
-4. **Never throws** — `.result()` catches errors and returns them in a discriminated union. Network failures, validation errors, and HTTP errors are all surfaced via `{ error }`.
-5. **Framework-compatible** — Accepts a custom `fetch` function per-call (e.g., SvelteKit's load `fetch`) or globally via config.
+5. **Never throws** — `.result()` catches errors and returns them in a discriminated union. Network failures, validation errors, and HTTP errors are all surfaced via `{ error }`.
+6. **Framework-compatible** — Accepts a custom `fetch` function per-call (e.g., SvelteKit's load `fetch`) or globally via config.
 
 ## Three Modes
 
@@ -64,15 +64,15 @@ This split is deliberate:
 
 The runtime validator enforces a deliberately small subset (see the supported-keyword table below). `openapi-typescript` may render features the runtime ignores. Where the two diverge, the type is stricter than the runtime. Examples:
 
-- `format: 'email'` → types as `string`, runtime accepts any string.
+- `format: 'email'` → types as `string`, runtime accepts any string (unless the spec uses a format helper that pairs `format` with an enforcing `pattern`).
 - `multipleOf` / `exclusiveMinimum` / `exclusiveMaximum` → ignored at runtime.
 - `patternProperties` / `propertyNames` / `additionalProperties` (sub-schema form) → unenforced.
 - `if` / `then` / `else`, `dependentSchemas`, `dependentRequired` → unenforced.
 - `prefixItems`, positional `items` (tuple arrays) → every element checked against the first schema.
 - External `$ref`, `$id`, `$schema` → unsupported.
-- Recursive `$ref` → no cycle detection; will overflow at runtime.
+- Recursive `$ref` → **supported**, via lazy binding in `compile(schema, defs)`; the first resolution is cached on the ref's closure. Self-references terminate on input depth.
 
-`lintSpec(spec)` (exported from `src/spec-tools.ts`) returns one `SpecDriftIssue` per drift point with an RFC 6901 JSON pointer, the unsupported keyword, a `'warn'` / `'info'` severity, and a message. Run from CI to fail builds on silent drift.
+`lintSpec(spec)` (from `@bajustone/fetcher/spec-tools`) returns one `SpecDriftIssue` per drift point with an RFC 6901 JSON pointer, the unsupported keyword, a `'warn'` / `'info'` severity, and a message. Run from CI to fail builds on silent drift.
 
 #### Why no zero-codegen OpenAPI inference?
 
@@ -87,20 +87,22 @@ If TypeScript ever ships [#32063](https://github.com/microsoft/TypeScript/issues
 ### Mode 2: Manual Route Schemas
 
 ```typescript
+import { object, string } from '@bajustone/fetcher/schema';
+
 const f = createFetch({
   baseUrl: 'https://api.example.com',
   routes: {
     '/auth/login': {
       POST: {
-        body: z.object({ email: z.string(), password: z.string() }),
-        response: z.object({ token: z.string() }),
+        body: object({ email: string(), password: string() }),
+        response: object({ token: string() }),
       },
     },
   },
 });
 ```
 
-Define routes with any Standard Schema V1 schema library. Types are inferred from the schemas via `ResolveBody` / `ResolveResponse` / `ResolveErrorResponse`.
+Define routes with any Standard Schema V1 schema library — the bundled `@bajustone/fetcher/schema` builder, Zod 3.24+, Valibot, ArkType, or anything with `~standard.validate`. Types are inferred from the schemas via `ResolveBody` / `ResolveResponse` / `ResolveErrorResponse`.
 
 ### Mode 3: Ad-hoc Per-Call Schema
 

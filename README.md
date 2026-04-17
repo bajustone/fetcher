@@ -11,7 +11,7 @@ Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.j
 - **Runtime validation** — responses are validated against your schemas at runtime, not just at compile time. Catch API drift before it breaks your UI.
 - **Recursive middleware** — Hono/Koa-shaped dispatcher with per-call override (`middleware: false`). Built-in `bearerWithRefresh` with concurrent-401 dedup and typed `exclude`.
 - **Batteries included** — retry with backoff/jitter, timeout, error extraction, `.result()` / `.unwrap()` / `.query()` primitives, instance forking via `.with()`.
-- **Standard Schema V1** — not locked to Zod. Works with Valibot, ArkType, or any schema with `~standard.validate`.
+- **Standard Schema V1** — not locked to Zod. Works with the bundled native schema builder, Valibot, ArkType, or any value with `~standard.validate`.
 
 ## Features
 
@@ -42,15 +42,15 @@ npx jsr add @bajustone/fetcher
 
 ```typescript
 import { createFetch } from '@bajustone/fetcher';
-import { z } from 'zod';
+import { object, string } from '@bajustone/fetcher/schema';
 
 const f = createFetch({
   baseUrl: 'https://api.example.com',
   routes: {
     '/auth/login': {
       POST: {
-        body: z.object({ email: z.string(), password: z.string() }),
-        response: z.object({ token: z.string() }),
+        body: object({ email: string(), password: string() }),
+        response: object({ token: string() }),
       },
     },
   },
@@ -77,6 +77,8 @@ response.ok;     // boolean
 response.status; // number
 const result2 = await response.result();
 ```
+
+Zod 3.24+, Valibot, and ArkType all drop in the same way — the bundled builder is just the zero-dep default.
 
 ## Three modes
 
@@ -140,7 +142,8 @@ The plugin watches the spec file during dev and regenerates on change.
 
 ```typescript
 import type { paths } from './generated/paths';
-import { createFetch, fromOpenAPI } from '@bajustone/fetcher';
+import { createFetch } from '@bajustone/fetcher';
+import { fromOpenAPI } from '@bajustone/fetcher/openapi';
 import spec from './openapi.json' with { type: 'json' };
 
 const f = createFetch<paths>({
@@ -236,7 +239,7 @@ Opt out entirely with `fetcherPlugin({ spec: ..., components: false })` — only
 `lintSpec(spec)` flags every keyword the runtime validator does NOT enforce (e.g., `format: 'email'` types as `string` but runtime accepts non-emails). Run from CI:
 
 ```typescript
-import { lintSpec } from '@bajustone/fetcher';
+import { lintSpec } from '@bajustone/fetcher/spec-tools';
 import spec from './openapi.json' with { type: 'json' };
 
 const issues = lintSpec(spec);
@@ -252,7 +255,7 @@ if (issues.length > 0) {
 `coverage(spec)` reports per-route schema complexity — which routes are fully typed, which fall back to `unknown`, and why:
 
 ```typescript
-import { coverage } from '@bajustone/fetcher';
+import { coverage } from '@bajustone/fetcher/spec-tools';
 import spec from './openapi.json' with { type: 'json' };
 
 const report = coverage(spec);
@@ -298,10 +301,13 @@ Any Standard Schema V1 schema works — the bundled `@bajustone/fetcher/schema` 
 ### 3. Ad-hoc per-call schema
 
 ```typescript
+import { createFetch } from '@bajustone/fetcher';
+import { boolean, object } from '@bajustone/fetcher/schema';
+
 const f = createFetch({ baseUrl: 'https://api.example.com' });
 
 const result = await f.get('/endpoint', {
-  responseSchema: z.object({ ok: z.boolean() }),
+  responseSchema: object({ ok: boolean() }),
 }).result();
 
 if (result.ok) {
