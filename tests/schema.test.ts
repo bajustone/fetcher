@@ -3,25 +3,47 @@ import type { StandardSchemaV1Result } from '../src/types.ts';
 import { describe, expect, it } from 'bun:test';
 import { fromJSONSchema } from '../src/from-json-schema.ts';
 import {
+  any_,
   array,
+  bigint_,
   boolean,
+  brand,
   compile,
   date,
   datetime,
+  describe as describeSchema,
   discriminatedUnion,
   email,
   enum_,
+  extend,
+  finite,
   integer,
   intersect,
+  keyof_,
   literal,
+  merge,
+  negative,
+  never_,
+  nonnegative,
+  nonpositive,
   null_,
   nullable,
   number,
   object,
+  omit,
   optional,
+  partial,
+  pick,
+  positive,
+  record,
   ref,
+  required,
+  safe,
   string,
   time,
+  title,
+  tuple,
+  undefined_,
   union,
   unknown,
   url,
@@ -312,5 +334,188 @@ describe('Infer — type-level sanity (compile-time only)', () => {
     const w: PetType = { id: 2, tag: 'x' };
     expect(v.id).toBe(1);
     expect(w.tag).toBe('x');
+  });
+});
+
+describe('extended primitives', () => {
+  it('undefined_ accepts only undefined', () => {
+    expect(ok(run(undefined_(), undefined))).toBe(undefined);
+    expect(issues(run(undefined_(), null))[0]!.code).toBe('expected_undefined');
+  });
+
+  it('any_ accepts anything', () => {
+    expect(ok(run(any_(), 'x'))).toBe('x');
+    expect(ok(run(any_(), 42))).toBe(42);
+    expect(ok(run(any_(), null))).toBe(null);
+  });
+
+  it('never_ rejects everything', () => {
+    expect(issues(run(never_(), 'x'))[0]!.code).toBe('never');
+    expect(issues(run(never_(), undefined))[0]!.code).toBe('never');
+  });
+
+  it('bigint_ accepts only bigint', () => {
+    expect(ok(run(bigint_(), 42n))).toBe(42n);
+    expect(issues(run(bigint_(), 42))[0]!.code).toBe('expected_bigint');
+  });
+
+  it('positive / nonnegative / negative / nonpositive bounds', () => {
+    expect(ok(run(positive(), 1))).toBe(1);
+    expect(issues(run(positive(), 0))[0]!.code).toBe('too_small');
+    expect(ok(run(nonnegative(), 0))).toBe(0);
+    expect(issues(run(nonnegative(), -1))[0]!.code).toBe('too_small');
+    expect(ok(run(negative(), -1))).toBe(-1);
+    expect(issues(run(negative(), 0))[0]!.code).toBe('too_large');
+    expect(ok(run(nonpositive(), 0))).toBe(0);
+    expect(issues(run(nonpositive(), 1))[0]!.code).toBe('too_large');
+  });
+
+  it('finite rejects Infinity / NaN', () => {
+    expect(ok(run(finite(), 1))).toBe(1);
+    expect(issues(run(finite(), Infinity))[0]!.code).toBe('expected_number');
+    expect(issues(run(finite(), Number.NaN))[0]!.code).toBe('expected_number');
+  });
+
+  it('safe bounds integers to MAX/MIN_SAFE_INTEGER', () => {
+    expect(ok(run(safe(), 42))).toBe(42);
+    expect(issues(run(safe(), Number.MAX_SAFE_INTEGER + 1))[0]!.code).toBe('too_large');
+  });
+});
+
+describe('extended string constraints', () => {
+  it('length (exact)', () => {
+    const s = string({ length: 3 });
+    expect(ok(run(s, 'abc'))).toBe('abc');
+    expect(issues(run(s, 'ab'))[0]!.code).toBe('too_short');
+    expect(issues(run(s, 'abcd'))[0]!.code).toBe('too_long');
+  });
+
+  it('startsWith / endsWith / includes', () => {
+    expect(ok(run(string({ startsWith: 'hi' }), 'hi there'))).toBe('hi there');
+    expect(issues(run(string({ startsWith: 'hi' }), 'bye'))[0]!.code).toBe('pattern_mismatch');
+    expect(ok(run(string({ endsWith: '!' }), 'wow!'))).toBe('wow!');
+    expect(issues(run(string({ endsWith: '!' }), 'wow'))[0]!.code).toBe('pattern_mismatch');
+    expect(ok(run(string({ includes: 'xyz' }), 'abcxyzdef'))).toBe('abcxyzdef');
+    expect(issues(run(string({ includes: 'xyz' }), 'abc'))[0]!.code).toBe('pattern_mismatch');
+  });
+});
+
+describe('extended number constraints', () => {
+  it('exclusiveMinimum / exclusiveMaximum', () => {
+    expect(ok(run(number({ exclusiveMinimum: 0 }), 1))).toBe(1);
+    expect(issues(run(number({ exclusiveMinimum: 0 }), 0))[0]!.code).toBe('too_small');
+    expect(ok(run(number({ exclusiveMaximum: 10 }), 9))).toBe(9);
+    expect(issues(run(number({ exclusiveMaximum: 10 }), 10))[0]!.code).toBe('too_large');
+  });
+
+  it('multipleOf', () => {
+    expect(ok(run(integer({ multipleOf: 5 }), 10))).toBe(10);
+    expect(issues(run(integer({ multipleOf: 5 }), 7))[0]!.code).toBe('not_a_multiple');
+  });
+});
+
+describe('object composition', () => {
+  const Pet = object({
+    id: integer(),
+    name: string(),
+    tag: optional(string()),
+  });
+
+  it('partial makes all keys optional', () => {
+    const P = partial(Pet);
+    expect(P.required).toEqual([]);
+    expect(ok(run(P, {}))).toEqual({});
+    expect(ok(run(P, { id: 1 }))).toEqual({ id: 1 });
+  });
+
+  it('required makes all keys required', () => {
+    const R = required(Pet);
+    expect(R.required.slice().sort()).toEqual(['id', 'name', 'tag']);
+    expect(issues(run(R, { id: 1, name: 'x' }))[0]!.code).toBe('missing');
+  });
+
+  it('pick selects only named keys', () => {
+    const P = pick(Pet, ['id', 'name'] as const);
+    expect(Object.keys(P.properties).sort()).toEqual(['id', 'name']);
+    expect(P.required.slice().sort()).toEqual(['id', 'name']);
+  });
+
+  it('omit drops named keys', () => {
+    const P = omit(Pet, ['tag'] as const);
+    expect(Object.keys(P.properties).sort()).toEqual(['id', 'name']);
+    expect(P.required.slice().sort()).toEqual(['id', 'name']);
+  });
+
+  it('extend adds new keys and overrides existing', () => {
+    const E = extend(Pet, { age: integer(), name: string({ minLength: 2 }) });
+    expect(Object.keys(E.properties).sort()).toEqual(['age', 'id', 'name', 'tag']);
+    expect(E.required.slice().sort()).toEqual(['age', 'id', 'name']);
+  });
+
+  it('merge combines two object schemas', () => {
+    const A = object({ a: integer() });
+    const B = object({ b: string() });
+    const M = merge(A, B);
+    expect(Object.keys(M.properties).sort()).toEqual(['a', 'b']);
+    expect(M.required.slice().sort()).toEqual(['a', 'b']);
+  });
+
+  it('keyof_ produces an enum of keys', () => {
+    const K = keyof_(Pet);
+    expect(K.enum.slice().sort()).toEqual(['id', 'name', 'tag']);
+    expect(ok(run(K, 'id'))).toBe('id');
+    expect(issues(run(K, 'bogus'))[0]!.code).toBe('not_in_enum');
+  });
+});
+
+describe('record + tuple', () => {
+  it('record validates string-keyed dictionary', () => {
+    const Prices = record(number());
+    expect(ok(run(Prices, { a: 1, b: 2 }))).toEqual({ a: 1, b: 2 });
+    expect(issues(run(Prices, { a: 'nope' }))[0]!.path).toEqual(['a']);
+    expect(issues(run(Prices, 42))[0]!.code).toBe('expected_object');
+  });
+
+  it('tuple validates fixed-length positional arrays', () => {
+    const Pair = tuple([string(), number()]);
+    expect(ok(run(Pair, ['a', 1]))).toEqual(['a', 1]);
+    expect(issues(run(Pair, ['a']))[0]!.code).toBe('too_short');
+    expect(issues(run(Pair, ['a', 1, 2]))[0]!.code).toBe('too_long');
+    expect(issues(run(Pair, [1, 1]))[0]!.path).toEqual([0]);
+  });
+});
+
+describe('brand + describe + title', () => {
+  it('brand passes through at runtime', () => {
+    const UserId = brand<'UserId'>()(integer());
+    const v = ok(run(UserId, 42));
+    expect(v as number).toBe(42);
+  });
+
+  it('describe attaches description', () => {
+    const s = describeSchema(string(), 'User email');
+    expect((s as unknown as { description: string }).description).toBe('User email');
+    expect(ok(run(s, 'x'))).toBe('x');
+  });
+
+  it('title attaches title', () => {
+    const s = title(string(), 'Email');
+    expect((s as unknown as { title: string }).title).toBe('Email');
+  });
+});
+
+describe('issue.code', () => {
+  it('every builder error emits a code alongside message', () => {
+    expect(issues(run(string(), 42))[0]!.code).toBe('expected_string');
+    expect(issues(run(integer(), 3.14))[0]!.code).toBe('expected_integer');
+    expect(issues(run(boolean(), 'yes'))[0]!.code).toBe('expected_boolean');
+    expect(issues(run(null_(), 'x'))[0]!.code).toBe('expected_null');
+    expect(issues(run(enum_(['a', 'b'] as const), 'c'))[0]!.code).toBe('not_in_enum');
+    expect(issues(run(union([string(), number()]), true))[0]!.code).toBe('no_variant_matched');
+    expect(issues(run(ref<unknown>('Missing'), 'x'))[0]!.code).toBe('unresolved_ref');
+    const obj = object({ a: integer() });
+    expect(issues(run(obj, {}))[0]!.code).toBe('missing');
+    expect(issues(run(obj, 'x'))[0]!.code).toBe('expected_object');
+    expect(issues(run(array(integer(), { minItems: 2 }), [1]))[0]!.code).toBe('too_short');
   });
 });

@@ -26,9 +26,9 @@ function formatString(formatName: string, regex: RegExp): FString {
       vendor: 'fetcher',
       validate(v): StandardSchemaV1Result<string> {
         if (typeof v !== 'string')
-          return { issues: [{ message: 'Expected string' }] };
+          return { issues: [{ code: 'expected_string', message: 'Expected string' }] };
         if (!regex.test(v))
-          return { issues: [{ message: 'Pattern mismatch' }] };
+          return { issues: [{ code: 'pattern_mismatch', message: 'Pattern mismatch' }] };
         return { value: v };
       },
     },

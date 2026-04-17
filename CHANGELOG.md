@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.2.0] - 2026-04-18
+
+Non-breaking feature release. Expands `@bajustone/fetcher/schema` with the
+most-requested structural primitives and adds machine-readable error codes
+to every builder-emitted validation issue. No changes to core or plugin.
+
+### Added
+
+**Object composition** (in `@bajustone/fetcher/schema`) — reshape existing
+object schemas without re-typing their properties:
+
+- `partial(schema)` — make all keys optional
+- `required(schema)` — make all keys required
+- `pick(schema, ['a', 'b'] as const)` — sub-selection
+- `omit(schema, ['c'] as const)` — inverse of pick
+- `extend(schema, { extraKey: ... })` — add/override keys
+- `merge(a, b)` — combine two object schemas
+- `keyof_(schema)` — enum of string keys
+
+**New composite types:**
+
+- `record(valueSchema)` — string-keyed dictionary, infers `Record<string, V>`
+- `tuple([a, b, c])` — fixed-length positional array, infers `[A, B, C]`
+
+**Extended primitives:**
+
+- `undefined_()` — explicit undefined (distinct from `optional`)
+- `any_()` — opts out of type checking (use `unknown` when possible)
+- `never_()` — rejects all values, for exhaustiveness helpers
+- `bigint_()` — validates `typeof v === 'bigint'` (for custom JSON parsers)
+
+**Number constraint expansion:**
+
+- `positive()`, `nonnegative()`, `negative()`, `nonpositive()`, `finite()`,
+  `safe()` — convenience wrappers
+- `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf` on `NumberOptions`
+
+**String constraint expansion:**
+
+- `length`, `startsWith`, `endsWith`, `includes` on `StringOptions`
+
+**Meta helpers:**
+
+- `brand<'UserId'>()(integer())` — type-level nominal typing, runtime
+  passthrough; `Brand<T, B>` type utility
+- `describe(schema, 'text')` — attaches JSON Schema `description`
+- `title(schema, 'text')` — attaches JSON Schema `title`
+
+**Machine-readable error codes:**
+
+- Every builder-emitted issue now carries a `code` field alongside
+  `message`. Stable snake_case identifiers: `expected_string`, `too_short`,
+  `missing`, `no_variant_matched`, `unknown_discriminator`, `unresolved_ref`,
+  `not_a_multiple`, etc. `StandardSchemaV1Issue.code` is an optional public
+  field so external validators can opt in or omit it.
+
+### Changed
+
+- `StandardSchemaV1Issue` interface gains `readonly code?: string` — purely
+  additive, existing implementations still satisfy the shape.
+
+### Bundle impact
+
+- Core (`.`): unchanged at ~2.7 KB gzipped.
+- `./schema` wholesale: 1.9 → 2.9 KB gz (the new factories add ~1 KB when
+  imported together). Per-factory tree-shaking still holds: a `string`-only
+  fixture ships at ~440 B gz.
+- `./openapi`: 3.7 → 4.0 KB gz (pulls more of the builder via
+  `fromJSONSchema`).
+
 ## [0.1.0] - 2026-04-17
 
 First breaking release. Adds a native, tree-shakeable schema builder and

@@ -212,28 +212,32 @@ src/
 
 Produces plain JSON Schema objects augmented with a pre-compiled `~standard.validate` closure at construction time. No runtime interpreter. Each factory is `/*@__NO_SIDE_EFFECTS__*/`-annotated so bundlers eliminate any factory whose result is never used.
 
-- **Primitives:** `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown`.
-- **Composites:** `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`.
+- **Primitives:** `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown`, `undefined_`, `any_`, `never_`, `bigint_`.
+- **Number convenience:** `positive`, `nonnegative`, `negative`, `nonpositive`, `finite`, `safe`.
+- **Composites:** `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`, `record`, `tuple`.
+- **Object composition:** `partial`, `required`, `pick`, `omit`, `extend`, `merge`, `keyof_` — rebuild object shapes without re-typing properties.
 - **Discriminated union:** `discriminatedUnion(key, mapping)` — O(1) dispatch by tag.
 - **Refs:** `ref(name)` + `compile(schema, defs)` — lazy binding, cycle-safe.
 - **Formats:** `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern`.
+- **Meta:** `brand<B>()(schema)` for nominal typing; `describe(schema, text)` / `title(schema, text)` for JSON Schema annotations.
 
-Each schema satisfies `StandardSchemaV1<unknown, T>` structurally, so it drops directly into any `RouteDefinition` slot. Inference via `Infer<typeof Pet>`.
+Each schema satisfies `StandardSchemaV1<unknown, T>` structurally, so it drops directly into any `RouteDefinition` slot. Inference via `Infer<typeof Pet>`. Every builder-emitted validation issue carries a stable snake_case `code` (`expected_string`, `too_short`, `missing`, `unknown_discriminator`, `unresolved_ref`, etc.) alongside the human-readable `message`.
 
 #### Supported keyword subset
 
 | Category | Keywords emitted + enforced |
 |---|---|
 | Type | `type` (`object`, `array`, `string`, `number`, `integer`, `boolean`, `null`) |
-| Object | `properties`, `required` |
-| Array | `items`, `minItems`, `maxItems` |
-| String | `minLength`, `maxLength`, `pattern`, `format` (via helpers) |
-| Number / integer | `minimum`, `maximum` (integer also enforces integer-ness) |
+| Object | `properties`, `required`, `additionalProperties` (for `record`) |
+| Array | `items`, `minItems`, `maxItems`, `prefixItems` (for `tuple`) |
+| String | `minLength`, `maxLength`, `pattern`, `format` (via helpers); non-standard: `startsWith`/`endsWith`/`includes` applied at validation time |
+| Number / integer | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf` |
 | Enum | `enum`, `const` |
 | Composition | `anyOf`, `allOf`, `oneOf` + `discriminator` |
 | Refs | `$ref` against a compiled `defs` map |
+| Meta | `title`, `description` |
 
-**Not exposed (intentionally):** `multipleOf`, `exclusiveMinimum`/`exclusiveMaximum`, `patternProperties`, `propertyNames`, `additionalProperties` (sub-schema form), `if`/`then`/`else`, `dependentSchemas`, `dependentRequired`, `prefixItems`, `contains`, `uniqueItems`.
+**Not exposed (intentionally):** `patternProperties`, `propertyNames`, `additionalProperties` (sub-schema form), `if`/`then`/`else`, `dependentSchemas`, `dependentRequired`, `contains`, `uniqueItems`, plus all transform/refine/coerce/default/catch features — out of scope per the "validate wire data as-is" principle.
 
 ### from-json-schema.ts
 

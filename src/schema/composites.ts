@@ -81,13 +81,13 @@ export function object<T extends FProperties>(
       vendor: 'fetcher',
       validate(v): StandardSchemaV1Result<FObjectOutput<T>> {
         if (typeof v !== 'object' || v === null || Array.isArray(v))
-          return { issues: [{ message: 'Expected object' }] };
+          return { issues: [{ code: 'expected_object', message: 'Expected object' }] };
         const obj = v as Record<string, unknown>;
         const issues: StandardSchemaV1Issue[] = [];
         for (let i = 0; i < required.length; i++) {
           const k = required[i]!;
           if (!(k in obj))
-            issues.push({ message: 'Missing', path: [k] });
+            issues.push({ code: 'missing', message: 'Missing', path: [k] });
         }
         for (let i = 0; i < keys.length; i++) {
           const k = keys[i]!;
@@ -122,11 +122,11 @@ export function array<T extends FSchema<unknown>>(
       vendor: 'fetcher',
       validate(v): StandardSchemaV1Result<Infer<T>[]> {
         if (!Array.isArray(v))
-          return { issues: [{ message: 'Expected array' }] };
+          return { issues: [{ code: 'expected_array', message: 'Expected array' }] };
         if (minItems !== undefined && v.length < minItems)
-          return { issues: [{ message: 'Too short' }] };
+          return { issues: [{ code: 'too_short', message: 'Too short' }] };
         if (maxItems !== undefined && v.length > maxItems)
-          return { issues: [{ message: 'Too long' }] };
+          return { issues: [{ code: 'too_long', message: 'Too long' }] };
         const issues: StandardSchemaV1Issue[] = [];
         for (let i = 0; i < v.length; i++) {
           const r = itemValidate(v[i]);
@@ -194,7 +194,7 @@ export function union<T extends readonly [FSchema<unknown>, ...FSchema<unknown>[
           if (!r.issues)
             return r as StandardSchemaV1Result<Infer<T[number]>>;
         }
-        return { issues: [{ message: 'No variant matched' }] };
+        return { issues: [{ code: 'no_variant_matched', message: 'No variant matched' }] };
       },
     },
   } as FUnion<T>;
@@ -246,7 +246,7 @@ export function enum_<T extends string | number | boolean>(
       vendor: 'fetcher',
       validate(v): StandardSchemaV1Result<T> {
         if (!set.has(v))
-          return { issues: [{ message: 'Not in enum' }] };
+          return { issues: [{ code: 'not_in_enum', message: 'Not in enum' }] };
         return { value: v as T };
       },
     },

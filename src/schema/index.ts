@@ -38,31 +38,62 @@ export {
   union,
 } from './composites.ts';
 
+export {
+  extend,
+  keyof_,
+  merge,
+  omit,
+  partial,
+  pick,
+  required,
+} from './composition.ts';
+
 export { discriminatedUnion } from './discriminated.ts';
 
 export { date, datetime, email, time, url, uuid } from './formats.ts';
 
+export { brand, describe, title } from './meta.ts';
+
+export type { Brand } from './meta.ts';
+
 export {
+  any_,
+  bigint_,
   boolean,
+  finite,
   integer,
   literal,
+  negative,
+  never_,
+  nonnegative,
+  nonpositive,
   null_,
   number,
+  positive,
+  safe,
   string,
+  undefined_,
   unknown,
 } from './primitives.ts';
+
+export { record, tuple } from './record-tuple.ts';
+
+export type { FRecord, FTuple } from './record-tuple.ts';
 
 export { compile, ref } from './refs.ts';
 
 export type {
   ArrayOptions,
+  FAny,
   FArray,
+  FBigInt,
   FBoolean,
   FDiscriminatedUnion,
   FEnum,
   FInteger,
   FIntersect,
   FLiteral,
+  FNever,
   FNull,
   FNumber,
   FObject,
@@ -72,6 +103,7 @@ export type {
   FRef,
   FSchema,
   FString,
+  FUndefined,
   FUnion,
   FUnknown,
   Infer,

@@ -58,12 +58,19 @@ export type FObjectOutput<T extends FProperties>
 export interface StringOptions {
   minLength?: number;
   maxLength?: number;
+  length?: number;
   pattern?: string;
+  startsWith?: string;
+  endsWith?: string;
+  includes?: string;
 }
 
 export interface NumberOptions {
   minimum?: number;
   maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  multipleOf?: number;
 }
 
 export interface ArrayOptions {
@@ -91,12 +98,18 @@ export interface FNumber extends FSchema<number> {
   readonly type: 'number';
   readonly minimum?: number;
   readonly maximum?: number;
+  readonly exclusiveMinimum?: number;
+  readonly exclusiveMaximum?: number;
+  readonly multipleOf?: number;
 }
 
 export interface FInteger extends FSchema<number> {
   readonly type: 'integer';
   readonly minimum?: number;
   readonly maximum?: number;
+  readonly exclusiveMinimum?: number;
+  readonly exclusiveMaximum?: number;
+  readonly multipleOf?: number;
 }
 
 export interface FBoolean extends FSchema<boolean> {
@@ -108,6 +121,14 @@ export interface FNull extends FSchema<null> {
 }
 
 export interface FUnknown extends FSchema<unknown> {}
+
+export interface FAny extends FSchema<any> {}
+
+export interface FNever extends FSchema<never> {}
+
+export interface FUndefined extends FSchema<undefined> {}
+
+export interface FBigInt extends FSchema<bigint> {}
 
 export interface FLiteral<T extends string | number | boolean> extends FSchema<T> {
   readonly const: T;

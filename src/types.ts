@@ -19,6 +19,13 @@ export type StandardSchemaV1PathSegment = PropertyKey | { readonly key: Property
 export interface StandardSchemaV1Issue {
   readonly message: string;
   readonly path?: ReadonlyArray<StandardSchemaV1PathSegment>;
+  /**
+   * Optional machine-readable code. Emitted by the bundled schema builder
+   * (e.g., `expected_string`, `too_short`, `missing`, `unknown_discriminator`)
+   * so consumers can map to localized or custom messages without parsing the
+   * human-facing `message`. External validators may omit this field.
+   */
+  readonly code?: string;
 }
 
 /**

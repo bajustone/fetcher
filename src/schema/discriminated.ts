@@ -31,10 +31,10 @@ export function discriminatedUnion<
       vendor: 'fetcher',
       validate(v): StandardSchemaV1Result<Infer<M[keyof M]>> {
         if (typeof v !== 'object' || v === null || Array.isArray(v))
-          return { issues: [{ message: 'Expected object' }] };
+          return { issues: [{ code: 'expected_object', message: 'Expected object' }] };
         const tag = (v as Record<string, unknown>)[key];
         if (typeof tag !== 'string' || !map.has(tag))
-          return { issues: [{ message: 'Unknown discriminator', path: [key] }] };
+          return { issues: [{ code: 'unknown_discriminator', message: 'Unknown discriminator', path: [key] }] };
         return map.get(tag)!(v) as StandardSchemaV1Result<Infer<M[keyof M]>>;
       },
     },

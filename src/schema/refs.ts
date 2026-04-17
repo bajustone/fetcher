@@ -32,7 +32,7 @@ export function ref<T = unknown>(name: string): FRef<T> {
       vendor: 'fetcher',
       validate(v): StandardSchemaV1Result<T> {
         if (!resolved)
-          return { issues: [{ message: 'Unresolved $ref' }] };
+          return { issues: [{ code: 'unresolved_ref', message: 'Unresolved $ref' }] };
         return resolved(v);
       },
     },
