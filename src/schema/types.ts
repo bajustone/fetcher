@@ -37,7 +37,22 @@ export interface FOptionalWrapper<T extends FSchema<unknown>>
   readonly '~wrapped': T;
 }
 
-export type FProperties = Record<string, FSchema<unknown> | FOptionalWrapper<FSchema<unknown>>>;
+/**
+ * Wrapper marker returned by {@link default_}. Differs from
+ * {@link FOptionalWrapper} in that missing / undefined input substitutes a
+ * fallback, so the inferred output type is the base type (not `| undefined`)
+ * and the key is required in the object output.
+ */
+export interface FDefaultWrapper<T extends FSchema<unknown>> extends FSchema<Infer<T>> {
+  readonly '~default': true;
+  readonly '~fallback': Infer<T>;
+  readonly '~wrapped': T;
+}
+
+export type FProperties = Record<
+  string,
+  FSchema<unknown> | FOptionalWrapper<FSchema<unknown>> | FDefaultWrapper<FSchema<unknown>>
+>;
 
 /**
  * Splits object properties into required (no wrapper) and optional (wrapped

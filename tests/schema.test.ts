@@ -11,12 +11,14 @@ import {
   compile,
   date,
   datetime,
+  default_,
   describe as describeSchema,
   discriminatedUnion,
   email,
   enum_,
   extend,
   finite,
+  formatIssues,
   integer,
   intersect,
   keyof_,
@@ -37,6 +39,7 @@ import {
   positive,
   record,
   ref,
+  refined,
   required,
   safe,
   string,
@@ -517,5 +520,109 @@ describe('issue.code', () => {
     expect(issues(run(obj, {}))[0]!.code).toBe('missing');
     expect(issues(run(obj, 'x'))[0]!.code).toBe('expected_object');
     expect(issues(run(array(integer(), { minItems: 2 }), [1]))[0]!.code).toBe('too_short');
+  });
+});
+
+describe('refined', () => {
+  it('runs predicate after base validation', () => {
+    const Https = refined(string(), s => s.startsWith('https://'), 'must be https');
+    expect(ok(run(Https, 'https://example.com'))).toBe('https://example.com');
+    const r = run(Https, 'http://example.com');
+    expect(r.issues?.[0]!.code).toBe('refine_failed');
+    expect(r.issues?.[0]!.message).toBe('must be https');
+  });
+
+  it('base schema failure short-circuits predicate', () => {
+    let called = 0;
+    const Gt3 = refined(integer(), (n) => {
+      called++;
+      return n > 3;
+    });
+    expect(issues(run(Gt3, 'nope'))[0]!.code).toBe('expected_integer');
+    expect(called).toBe(0);
+  });
+
+  it('composes with existing constraints', () => {
+    const Password = refined(
+      string({ minLength: 8 }),
+      s => /[A-Z]/.test(s) && /\d/.test(s),
+      'must contain uppercase and digit',
+    );
+    expect(ok(run(Password, 'Secure1!'))).toBe('Secure1!');
+    expect(issues(run(Password, 'short'))[0]!.code).toBe('too_short');
+    expect(issues(run(Password, 'alllowercase1'))[0]!.code).toBe('refine_failed');
+  });
+
+  it('uses default message when none provided', () => {
+    const Positive = refined(integer(), n => n > 0);
+    expect(issues(run(Positive, -1))[0]!.message).toBe('Refinement failed');
+  });
+});
+
+describe('default_', () => {
+  it('substitutes fallback on undefined input', () => {
+    const D = default_(string(), 'fallback');
+    expect(ok(run(D, undefined))).toBe('fallback');
+    expect(ok(run(D, 'actual'))).toBe('actual');
+  });
+
+  it('validates non-undefined inputs through inner schema', () => {
+    const D = default_(integer({ minimum: 0 }), 0);
+    expect(ok(run(D, 5))).toBe(5);
+    expect(issues(run(D, 'nope'))[0]!.code).toBe('expected_integer');
+    expect(issues(run(D, -1))[0]!.code).toBe('too_small');
+  });
+
+  it('inside object, missing key fills fallback and key becomes required-typed', () => {
+    const User = object({
+      name: string(),
+      theme: default_(enum_(['light', 'dark'] as const), 'light'),
+    });
+    expect(User.required.slice().sort()).toEqual(['name']);
+    expect(ok(run(User, { name: 'x' }))).toEqual({ name: 'x', theme: 'light' });
+    expect(ok(run(User, { name: 'x', theme: 'dark' }))).toEqual({ name: 'x', theme: 'dark' });
+    expect(issues(run(User, { name: 'x', theme: 'neon' }))[0]!.code).toBe('not_in_enum');
+  });
+
+  it('does not clone the input when no default fires', () => {
+    const User = object({ name: string() });
+    const input = { name: 'x' };
+    const r = run(User, input);
+    expect((r as { value: unknown }).value).toBe(input);
+  });
+
+  it('exposes default in JSON Schema output', () => {
+    const D = default_(string(), 'x');
+    expect((D as unknown as { default: string }).default).toBe('x');
+  });
+});
+
+describe('formatIssues', () => {
+  it('joins path and message per line', () => {
+    const User = object({ name: string(), email: string({ pattern: '^.+@.+$' }) });
+    const r = run(User, { name: 'x', email: 'bad' });
+    const text = formatIssues(r.issues ?? []);
+    expect(text).toBe('email: Pattern mismatch');
+  });
+
+  it('handles nested paths', () => {
+    const S = object({ user: object({ email: string({ pattern: '^.+@.+$' }) }) });
+    const r = run(S, { user: { email: 'bad' } });
+    expect(formatIssues(r.issues ?? [])).toBe('user.email: Pattern mismatch');
+  });
+
+  it('uses custom separator and joiner', () => {
+    const Form = object({
+      a: integer(),
+      b: integer(),
+    });
+    const r = run(Form, { a: 'x', b: 'y' });
+    const text = formatIssues(r.issues ?? [], { separator: '; ', pathJoiner: '/' });
+    expect(text).toBe('a: Expected integer; b: Expected integer');
+  });
+
+  it('root-level issue has no path prefix', () => {
+    const r = run(string(), 42);
+    expect(formatIssues(r.issues ?? [])).toBe('Expected string');
   });
 });

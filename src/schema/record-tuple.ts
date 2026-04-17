@@ -34,6 +34,7 @@ function prependPath(
   issue: StandardSchemaV1Issue,
 ): StandardSchemaV1Issue {
   return {
+    ...(issue.code !== undefined && { code: issue.code }),
     message: issue.message,
     path: issue.path ? [segment, ...issue.path] : [segment],
   };

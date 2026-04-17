@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.3.0] - 2026-04-18
+
+Non-breaking additions to `@bajustone/fetcher/schema`. Closes the last two
+"I wanted that" gaps for DTO validation: custom predicates and
+undefined-only defaults. Plus an ergonomic display helper.
+
+### Added
+
+- `refined(schema, predicate, message?)` — wraps any base schema with a
+  custom validation predicate. Runs after the base validator passes.
+  Emits `refine_failed` code on predicate rejection. For cross-field
+  rules, business constraints, or checks that don't fit in the standard
+  options.
+
+- `default_(schema, fallback)` — undefined-only fallback. Missing object
+  keys or `undefined` inputs substitute `fallback` without invoking the
+  base validator. Any other value validates through the inner schema
+  normally. Key stays required-typed in object output (consumer always
+  sees the value). Emits `default: fallback` in the JSON Schema.
+
+- `formatIssues(issues, options?)` — flattens an issues array into a
+  display string. Configurable separator, path joiner, and path/message
+  separator. Purely display; no API change to issue shape.
+
+### Changed
+
+- `prependPath` helper inside `object`, `array`, and `record`/`tuple`
+  validators now preserves the `code` field on propagated issues. Prior
+  versions dropped `code` when re-wrapping an issue with a parent path.
+
+### Bundle impact
+
+- Core and other subpaths unchanged.
+- `./schema` wholesale: ~2.9 → ~3.0 KB gz (+100 B for the three new
+  factories + issue-code preservation path).
+- Per-schema incremental cost: ~50 B gz when `refined` / `default_` /
+  `formatIssues` is imported.
+
+### Intentionally still out of scope
+
+Per the discussion on discovered design: `.transform()`, `.pipe()`,
+`.preprocess()`, `.coerce()`, `.catch()`, async validation, `received`
+field on issues, constraint params, sub-issue trees for unions.
+`refined` + `default_` cover the ~70% of transform-like needs that
+align with "validate wire data as-is"; the rest are covered by
+Zod/Valibot drop-in via Standard Schema V1.
+
 ## [0.2.0] - 2026-04-18
 
 Non-breaking feature release. Expands `@bajustone/fetcher/schema` with the

@@ -25,7 +25,7 @@ export type Brand<T, B extends string> = T & { readonly [BRAND]: B };
  * ```
  */
 /* @__NO_SIDE_EFFECTS__ */
-export function brand<B extends string>() {
+export function brand<B extends string>(): <S extends FSchema<unknown>>(schema: S) => FSchema<Brand<Infer<S>, B>> {
   return <S extends FSchema<unknown>>(schema: S): FSchema<Brand<Infer<S>, B>> =>
     schema as unknown as FSchema<Brand<Infer<S>, B>>;
 }

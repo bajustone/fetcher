@@ -50,6 +50,10 @@ export {
 
 export { discriminatedUnion } from './discriminated.ts';
 
+export { formatIssues } from './format-issues.ts';
+
+export type { FormatIssuesOptions } from './format-issues.ts';
+
 export { date, datetime, email, time, url, uuid } from './formats.ts';
 
 export { brand, describe, title } from './meta.ts';
@@ -80,6 +84,8 @@ export { record, tuple } from './record-tuple.ts';
 
 export type { FRecord, FTuple } from './record-tuple.ts';
 
+export { default_, refined } from './refinements.ts';
+
 export { compile, ref } from './refs.ts';
 
 export type {
@@ -88,6 +94,7 @@ export type {
   FArray,
   FBigInt,
   FBoolean,
+  FDefaultWrapper,
   FDiscriminatedUnion,
   FEnum,
   FInteger,

@@ -350,11 +350,16 @@ Every factory is annotated `/*@__NO_SIDE_EFFECTS__*/`, so a bundler eliminates a
 
 | Category | Factories |
 |---|---|
-| Primitives | `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown` |
-| Composites | `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_` |
+| Primitives | `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown`, `undefined_`, `any_`, `never_`, `bigint_` |
+| Number convenience | `positive`, `nonnegative`, `negative`, `nonpositive`, `finite`, `safe` |
+| Composites | `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`, `record`, `tuple` |
+| Object composition | `partial`, `required`, `pick`, `omit`, `extend`, `merge`, `keyof_` |
+| Predicates & defaults | `refined(schema, predicate, msg?)`, `default_(schema, fallback)` |
 | Tagged | `discriminatedUnion(key, { tag: variant })` — O(1) dispatch by property lookup |
 | Refs | `ref(name)` + `compile(schema, defs)` — lazy, cycle-safe binding |
 | Formats | `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern` |
+| Meta | `brand<B>()`, `describe(schema, text)`, `title(schema, text)` |
+| Errors | `formatIssues(issues, opts?)` display helper |
 
 ### Discriminated unions
 
@@ -422,16 +427,48 @@ const User = fromJSONSchema<{ id: number; name: string }>({
 
 `fromJSONSchema` dispatches each keyword to the matching builder factory, so the result tree-shakes identically.
 
+### Custom predicates and defaults
+
+```typescript
+import { default_, integer, object, refined, string } from '@bajustone/fetcher/schema';
+
+const Password = refined(
+  string({ minLength: 8 }),
+  (s) => /[A-Z]/.test(s) && /\d/.test(s),
+  'must contain uppercase and digit',
+);
+
+const User = object({
+  name: string(),
+  theme: default_(string(), 'light'),  // missing → 'light'; present value validates normally
+});
+```
+
+`refined` runs the base schema first, then your predicate; failure emits `code: 'refine_failed'`. `default_` fires only on `undefined` / missing object keys — any present value goes through the base schema unchanged. `default_` keeps the key required-typed so consumers always see the value.
+
+### Error display
+
+```typescript
+import { formatIssues } from '@bajustone/fetcher/schema';
+
+const r = schema['~standard'].validate(data);
+if (r.issues) console.error(formatIssues(r.issues));
+// user.email: Pattern mismatch
+// user.age: Too small
+// items.0.name: Missing
+```
+
+Optional `{ separator, pathJoiner, pathMessageSeparator }` for custom formatting. Every builder-emitted issue also carries a stable snake_case `code` (`expected_string`, `too_short`, `missing`, `refine_failed`, …) for i18n or structured error mapping.
+
 ### What's intentionally out of scope
 
 The builder exposes only keywords the runtime can enforce. If you need any of these, reach for Zod / Valibot / ArkType — they all drop in via Standard Schema V1.
 
-- **No transforms** — `.refine()`, `.transform()`, `.pipe()`, `.preprocess()`, `.coerce()`, `.default()`, `.catch()`. The builder validates wire data as-is.
-- **No compositional sugar** — `.extend()`, `.partial()`, `.pick()`, `.omit()`, `.merge()`. Define the target shape directly.
-- **No narrow numeric constraints** — `multipleOf`, `exclusiveMinimum`/`exclusiveMaximum`. Only `minimum` / `maximum`.
-- **No object keywords beyond `required` / `properties`** — no `patternProperties`, `propertyNames`, or sub-schema `additionalProperties`.
+- **No transforms** — `.transform()`, `.pipe()`, `.preprocess()`, `.coerce()`, `.catch()`. The builder validates wire data as-is.
+- **No compositional sugar** beyond what ships (`partial`, `pick`, `omit`, `extend`, `merge`, `keyof_`).
 - **No conditional schemas** — `if` / `then` / `else`, `dependentSchemas`, `dependentRequired`.
-- **No array tuples** — `prefixItems`, `contains`, `uniqueItems`.
+- **No array tuples beyond `tuple`** — no `contains`, `uniqueItems`.
+- **No async validation** — sync only; async validation belongs at the fetch or form layer.
 
 ## Result and error model
 
@@ -688,11 +725,16 @@ export async function load({ fetch }) {
 
 | Export | Purpose |
 |---|---|
-| `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown` | Primitive factories. |
-| `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_` | Composites. |
+| `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown`, `undefined_`, `any_`, `never_`, `bigint_` | Primitive factories. |
+| `positive`, `nonnegative`, `negative`, `nonpositive`, `finite`, `safe` | Number convenience wrappers. |
+| `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`, `record`, `tuple` | Composites. |
+| `partial`, `required`, `pick`, `omit`, `extend`, `merge`, `keyof_` | Object composition helpers. |
+| `refined(schema, predicate, msg?)`, `default_(schema, fallback)` | Custom predicates and undefined-only defaults. |
 | `discriminatedUnion(key, map)` | O(1) tagged-union dispatch. |
 | `ref(name)` + `compile(schema, defs)` | Lazy, cycle-safe `$ref` binding. |
 | `email`, `url`, `uuid`, `datetime`, `date`, `time` | Format helpers — emit `format` + enforcing `pattern`. |
+| `brand<B>()`, `describe`, `title` | Type-level brand + JSON Schema annotations. |
+| `formatIssues(issues, opts?)` | Display helper for issue arrays. |
 | `Infer<typeof X>` | Extract the validated output type. |
 
 ### OpenAPI / JSON Schema (`@bajustone/fetcher/openapi`)

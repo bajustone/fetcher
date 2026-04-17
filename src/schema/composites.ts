@@ -14,6 +14,7 @@ import type {
 import type {
   ArrayOptions,
   FArray,
+  FDefaultWrapper,
   FEnum,
   FIntersect,
   FNull,
@@ -30,9 +31,15 @@ import type {
 type SyncValidate<T> = (value: unknown) => StandardSchemaV1Result<T>;
 
 function isOptional(
-  entry: FSchema<unknown> | FOptionalWrapper<FSchema<unknown>>,
+  entry: FSchema<unknown> | FOptionalWrapper<FSchema<unknown>> | FDefaultWrapper<FSchema<unknown>>,
 ): entry is FOptionalWrapper<FSchema<unknown>> {
   return (entry as FOptionalWrapper<FSchema<unknown>>)['~optional'] === true;
+}
+
+function isDefault(
+  entry: FSchema<unknown> | FOptionalWrapper<FSchema<unknown>> | FDefaultWrapper<FSchema<unknown>>,
+): entry is FDefaultWrapper<FSchema<unknown>> {
+  return (entry as FDefaultWrapper<FSchema<unknown>>)['~default'] === true;
 }
 
 function prependPath(
@@ -40,6 +47,7 @@ function prependPath(
   issue: StandardSchemaV1Issue,
 ): StandardSchemaV1Issue {
   return {
+    ...(issue.code !== undefined && { code: issue.code }),
     message: issue.message,
     path: issue.path ? [segment, ...issue.path] : [segment],
   };
@@ -53,21 +61,32 @@ export function object<T extends FProperties>(
   const required: string[] = [];
   const keys: string[] = [];
   const validators: Array<SyncValidate<unknown>> = [];
+  const callIfMissing: boolean[] = [];
   const properties: Record<string, FSchema<unknown>> = {};
+  let anyDefaulted = false;
 
   for (const key in props) {
     const entry = props[key]!;
-    if (isOptional(entry)) {
+    if (isDefault(entry)) {
+      properties[key] = entry['~wrapped'];
+      keys.push(key);
+      validators.push(entry['~standard'].validate as SyncValidate<unknown>);
+      callIfMissing.push(true);
+      anyDefaulted = true;
+    }
+    else if (isOptional(entry)) {
       const inner = entry['~wrapped'];
       properties[key] = inner;
       keys.push(key);
       validators.push(inner['~standard'].validate as SyncValidate<unknown>);
+      callIfMissing.push(false);
     }
     else {
       properties[key] = entry;
       required.push(key);
       keys.push(key);
       validators.push(entry['~standard'].validate as SyncValidate<unknown>);
+      callIfMissing.push(false);
     }
   }
 
@@ -89,17 +108,25 @@ export function object<T extends FProperties>(
           if (!(k in obj))
             issues.push({ code: 'missing', message: 'Missing', path: [k] });
         }
+        let out: Record<string, unknown> | null = null;
         for (let i = 0; i < keys.length; i++) {
           const k = keys[i]!;
-          if (k in obj) {
+          const missing = !(k in obj);
+          if (!missing || callIfMissing[i]) {
             const r = validators[i]!(obj[k]);
             if (r.issues) {
               for (let j = 0; j < r.issues.length; j++)
                 issues.push(prependPath(k, r.issues[j]!));
             }
+            else if (missing && anyDefaulted) {
+              out ??= { ...obj };
+              out[k] = r.value;
+            }
           }
         }
-        return issues.length ? { issues } : { value: v as FObjectOutput<T> };
+        if (issues.length)
+          return { issues };
+        return { value: (out ?? v) as FObjectOutput<T> };
       },
     },
   } as FObject<T>;
