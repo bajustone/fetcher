@@ -57,8 +57,14 @@ describe('fetcherPlugin', () => {
 
       const content = readFileSync(envDts, 'utf-8');
       expect(content).toContain('declare module \'virtual:fetcher\'');
-      expect(content).toContain('import type { Routes } from \'@bajustone/fetcher\'');
+      // Imports all come from '@bajustone/fetcher' — no relative paths
+      expect(content).toMatch(/from '@bajustone\/fetcher'/);
       expect(content).toContain('export const routes: Routes');
+      // Components enabled by default: schemas + validators declared on
+      // virtual:fetcher, schemas on virtual:fetcher/inlined
+      expect(content).toContain('export const schemas: Record<string, JSONSchemaDefinition>');
+      expect(content).toContain('export const validators: Record<string, StandardSchemaV1<unknown, unknown>>');
+      expect(content).toContain('declare module \'virtual:fetcher/inlined\'');
       // No relative paths import — eliminates SvelteKit fragility
       expect(content).not.toContain('from \'./paths\'');
     });
@@ -68,6 +74,11 @@ describe('fetcherPlugin', () => {
     it('resolves virtual:fetcher to the internal virtual ID', () => {
       const resolved = (plugin.resolveId as (source: string) => string | null)('virtual:fetcher');
       expect(resolved).toBe('\0virtual:fetcher');
+    });
+
+    it('resolves virtual:fetcher/inlined to its sentinel', () => {
+      const resolved = (plugin.resolveId as (source: string) => string | null)('virtual:fetcher/inlined');
+      expect(resolved).toBe('\0virtual:fetcher/inlined');
     });
 
     it('returns null for other imports', () => {
@@ -110,6 +121,81 @@ describe('fetcherPlugin', () => {
       const code = (plugin.load as (id: string) => string | null)('some-other-module');
       expect(code).toBeNull();
     });
+
+    it('emits schemas and validators by default on virtual:fetcher', () => {
+      const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher')!;
+      expect(code).toContain('export const schemas');
+      expect(code).toContain('export const validators');
+      expect(code).toContain('__components');
+      // Validators should use lazy getters, not a Proxy
+      expect(code).toContain('__validatorCache');
+      expect(code).not.toContain('new Proxy');
+    });
+
+    it('emits virtual:fetcher/inlined with schemas and cyclic/acyclic partitioning', () => {
+      const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher/inlined')!;
+      expect(code).toContain('export const schemas');
+      expect(code).toContain('__inlined');
+      expect(code).toContain('__cyclic');
+      // Cyclic getter should throw with the canonical message prefix
+      expect(code).toContain('is recursive and cannot be inlined');
+    });
+
+    it('inlined module output contains no $ref from the petstore fixture', () => {
+      const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher/inlined')!;
+      // petstore has no cyclic types — after inlining, no $ref should appear
+      // (ignore $schema / $defs checks; $ref is the critical one)
+      expect(code.includes('"$ref"')).toBe(false);
+    });
+
+    it('canonical module preserves $ref shape for consumers that resolve them', () => {
+      const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher')!;
+      // petstore Pet is referenced from routes — it may appear in __defs or inlined
+      // into __components; either way the bundled component form keeps $ref.
+      expect(code).toContain('$defs');
+    });
+  });
+});
+
+describe('fetcherPlugin with components: false', () => {
+  let tmpDir: string;
+  let plugin: ReturnType<typeof fetcherPlugin>;
+
+  beforeAll(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-test-off-'));
+    plugin = fetcherPlugin({
+      spec: SPEC_PATH,
+      output: tmpDir,
+      components: false,
+    });
+    await (plugin.buildStart as () => Promise<void>)();
+  });
+
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('omits schemas and validators from virtual:fetcher', () => {
+    const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher')!;
+    expect(code).not.toContain('export const schemas');
+    expect(code).not.toContain('export const validators');
+    // routes still exported
+    expect(code).toContain('export const routes');
+  });
+
+  it('emits an empty virtual:fetcher/inlined module', () => {
+    const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher/inlined')!;
+    expect(code).toContain('export {}');
+  });
+
+  it('omits schemas/validators declarations from fetcher-env.d.ts', () => {
+    const envDts = join(tmpDir, 'fetcher-env.d.ts');
+    const content = readFileSync(envDts, 'utf-8');
+    expect(content).toContain('declare module \'virtual:fetcher\'');
+    expect(content).toContain('export const routes: Routes');
+    expect(content).not.toContain('export const schemas');
+    expect(content).not.toContain('export const validators');
+    expect(content).not.toContain('virtual:fetcher/inlined');
   });
 });
 

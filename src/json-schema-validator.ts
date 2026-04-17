@@ -32,17 +32,32 @@ export interface JSONSchemaDefinition {
   anyOf?: JSONSchemaDefinition[];
   allOf?: JSONSchemaDefinition[];
   $ref?: string;
+  $defs?: Record<string, JSONSchemaDefinition>;
+  $schema?: string;
+  $id?: string;
+  const?: unknown;
   additionalProperties?: boolean | JSONSchemaDefinition;
   format?: string;
   default?: unknown;
   description?: string;
+  title?: string;
+  example?: unknown;
+  examples?: unknown[];
   minimum?: number;
   maximum?: number;
+  exclusiveMinimum?: number | boolean;
+  exclusiveMaximum?: number | boolean;
   minLength?: number;
   maxLength?: number;
   pattern?: string;
   minItems?: number;
   maxItems?: number;
+  readOnly?: boolean;
+  writeOnly?: boolean;
+  discriminator?: { propertyName: string; mapping?: Record<string, string> };
+  xml?: unknown;
+  externalDocs?: unknown;
+  [key: `x-${string}`]: unknown;
 }
 
 const REF_PREFIX_PATTERN = /^#\//;

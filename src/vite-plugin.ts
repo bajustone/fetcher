@@ -42,7 +42,8 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { extractRouteSchemas } from './openapi.ts';
+import { inline } from './inline.ts';
+import { extractComponentSchemas, extractRouteSchemas } from './openapi.ts';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -66,6 +67,24 @@ export interface FetcherPluginOptions {
    * Falls back to the local file if the fetch fails.
    */
   url?: string;
+  /**
+   * Whether to expose `schemas` and `validators` exports from the virtual
+   * modules.
+   *
+   * - `'inline'` (default): emit both
+   *   - `virtual:fetcher` — spec-canonical JSON Schema draft-2020-12 with
+   *     local `$defs` + `$ref`. Works with ref-aware consumers (AJV, TypeBox)
+   *     out of the box. `validators.X` resolves refs at validation time.
+   *   - `virtual:fetcher/inlined` — fully-flattened schemas (no `$ref`,
+   *     built at plugin time). Drop-in for consumers that don't resolve
+   *     refs (sveltekit-superforms' `schemasafe` adapter, Zod 4's
+   *     experimental `z.fromJSONSchema`, react-jsonschema-form). Cyclic
+   *     components emit as throwing getters with an actionable message.
+   * - `false`: omit both `schemas` and `validators`; only `routes` is
+   *   exported from `virtual:fetcher`, and `virtual:fetcher/inlined` emits
+   *   an empty module.
+   */
+  components?: 'inline' | false;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,8 +92,10 @@ export interface FetcherPluginOptions {
 // ---------------------------------------------------------------------------
 
 const VIRTUAL_MODULE_ID = 'virtual:fetcher';
+const VIRTUAL_INLINED_ID = 'virtual:fetcher/inlined';
 /** Rollup convention: `\0` prefix marks a virtual module. */
 const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_MODULE_ID}`;
+const RESOLVED_INLINED_ID = `\0${VIRTUAL_INLINED_ID}`;
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -131,7 +152,7 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
 
     await runOpenAPITypeScript(specPath, pathsDtsPath);
     appendSchemaHelper(pathsDtsPath);
-    emitEnvDeclaration(envDtsPath);
+    emitEnvDeclaration(envDtsPath, options.components !== false);
   }
 
   return {
@@ -142,45 +163,39 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
       await generate();
     },
 
-    // Rollup hook: intercept `import 'virtual:fetcher'`.
+    // Rollup hook: intercept `import 'virtual:fetcher'` and
+    // `import 'virtual:fetcher/inlined'`.
     resolveId(source: string) {
       if (source === VIRTUAL_MODULE_ID)
         return RESOLVED_VIRTUAL_ID;
+      if (source === VIRTUAL_INLINED_ID)
+        return RESOLVED_INLINED_ID;
       return null;
     },
 
-    // Rollup hook: provide the virtual module's source code.
-    // Extracts only the JSON Schema nodes needed for validation at build
-    // time — the full OpenAPI spec is never shipped to the client bundle.
-    // Exports `routes` (not a pre-built client) so the user controls
-    // middleware, baseUrl, and other config via their own `createFetch`.
+    // Rollup hook: provide the virtual modules' source code.
+    // - `virtual:fetcher` → spec-canonical JSON Schema draft-2020-12 with
+    //   local $defs + $ref (ref-aware consumers handle natively)
+    // - `virtual:fetcher/inlined` → fully-flattened schemas, pre-inlined at
+    //   plugin time (zero runtime cost, stable identity). Cyclic components
+    //   emit as throwing getters.
+    //
+    // Only the JSON Schema nodes needed for validation are inlined — the
+    // full OpenAPI spec is never shipped to the client bundle.
     load(id: string) {
-      if (id !== RESOLVED_VIRTUAL_ID)
+      if (id !== RESOLVED_VIRTUAL_ID && id !== RESOLVED_INLINED_ID)
         return null;
 
       const rawSpec = JSON.parse(readFileSync(specPath, 'utf-8'));
-      const { definitions, routes } = extractRouteSchemas(rawSpec);
+      const emitComponents = options.components !== false;
 
-      return [
-        `import { JSONSchemaValidator } from '@bajustone/fetcher';`,
-        `const __defs = ${JSON.stringify(definitions)};`,
-        `const __routes = ${JSON.stringify(routes)};`,
-        `function __buildRoutes(extracted, defs) {`,
-        `  const r = {};`,
-        `  for (const [path, methods] of Object.entries(extracted)) {`,
-        `    r[path] = {};`,
-        `    for (const [method, schemas] of Object.entries(methods)) {`,
-        `      const d = {};`,
-        `      for (const [key, schema] of Object.entries(schemas)) {`,
-        `        d[key] = new JSONSchemaValidator(schema, defs);`,
-        `      }`,
-        `      r[path][method] = d;`,
-        `    }`,
-        `  }`,
-        `  return r;`,
-        `}`,
-        `export const routes = __buildRoutes(__routes, __defs);`,
-      ].join('\n');
+      if (id === RESOLVED_INLINED_ID) {
+        if (!emitComponents)
+          return `export {};\n`;
+        return buildInlinedModule(rawSpec);
+      }
+
+      return buildCanonicalModule(rawSpec, emitComponents);
     },
 
     // Vite-specific hook: watch the spec file and regenerate on change.
@@ -193,10 +208,12 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
 
         try {
           await generate();
-          // Invalidate the virtual module so Vite serves fresh code.
-          const mod = server.moduleGraph.getModuleById(RESOLVED_VIRTUAL_ID);
-          if (mod)
-            server.moduleGraph.invalidateModule(mod);
+          // Invalidate both virtual modules so Vite serves fresh code.
+          for (const moduleId of [RESOLVED_VIRTUAL_ID, RESOLVED_INLINED_ID]) {
+            const mod = server.moduleGraph.getModuleById(moduleId);
+            if (mod)
+              server.moduleGraph.invalidateModule(mod);
+          }
           server.ws.send({ type: 'full-reload' });
         }
         catch (error) {
@@ -212,6 +229,103 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Emits the source for `virtual:fetcher` — the spec-canonical module exposing
+ * `routes`, and (when `emitComponents` is true) `schemas` and `validators`.
+ * `schemas.X` retains local `$defs` + `$ref`; `validators.X` resolves those
+ * refs at validation time.
+ */
+function buildCanonicalModule(rawSpec: unknown, emitComponents: boolean): string {
+  const { definitions, routes } = extractRouteSchemas(rawSpec as Parameters<typeof extractRouteSchemas>[0]);
+
+  const parts: string[] = [
+    `import { JSONSchemaValidator } from '@bajustone/fetcher';`,
+    `const __defs = ${JSON.stringify(definitions)};`,
+    `const __routes = ${JSON.stringify(routes)};`,
+    `function __buildRoutes(extracted, defs) {`,
+    `  const r = {};`,
+    `  for (const [path, methods] of Object.entries(extracted)) {`,
+    `    r[path] = {};`,
+    `    for (const [method, schemas] of Object.entries(methods)) {`,
+    `      const d = {};`,
+    `      for (const [key, schema] of Object.entries(schemas)) {`,
+    `        d[key] = new JSONSchemaValidator(schema, defs);`,
+    `      }`,
+    `      r[path][method] = d;`,
+    `    }`,
+    `  }`,
+    `  return r;`,
+    `}`,
+    `export const routes = __buildRoutes(__routes, __defs);`,
+  ];
+
+  if (emitComponents) {
+    const { schemas } = extractComponentSchemas(rawSpec as Parameters<typeof extractComponentSchemas>[0]);
+    parts.push(
+      `const __components = ${JSON.stringify(schemas)};`,
+      `export const schemas = Object.freeze(__components);`,
+      `const __validatorCache = Object.create(null);`,
+      `const __validatorDescriptors = {};`,
+      `for (const __name of Object.keys(__components)) {`,
+      `  __validatorDescriptors[__name] = {`,
+      `    enumerable: true,`,
+      `    get() {`,
+      `      return __validatorCache[__name] ??= new JSONSchemaValidator(`,
+      `        __components[__name],`,
+      `        { $defs: __components[__name].$defs ?? {} },`,
+      `      );`,
+      `    },`,
+      `  };`,
+      `}`,
+      `export const validators = Object.freeze(Object.create(null, __validatorDescriptors));`,
+    );
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Emits the source for `virtual:fetcher/inlined` — the fully-flattened
+ * `schemas` export. Acyclic components are pre-inlined at plugin time;
+ * cyclic components emit as throwing getters.
+ */
+function buildInlinedModule(rawSpec: unknown): string {
+  const { schemas } = extractComponentSchemas(rawSpec as Parameters<typeof extractComponentSchemas>[0]);
+
+  const inlinedAcyclic: Record<string, unknown> = {};
+  const cyclicNames: string[] = [];
+
+  for (const [name, schema] of Object.entries(schemas)) {
+    try {
+      inlinedAcyclic[name] = inline(schema);
+    }
+    catch {
+      cyclicNames.push(name);
+    }
+  }
+
+  return [
+    `const __inlined = ${JSON.stringify(inlinedAcyclic)};`,
+    `const __cyclic = ${JSON.stringify(cyclicNames)};`,
+    `const __descriptors = {};`,
+    `for (const __name of Object.keys(__inlined)) {`,
+    `  __descriptors[__name] = { enumerable: true, value: __inlined[__name] };`,
+    `}`,
+    `for (const __name of __cyclic) {`,
+    `  __descriptors[__name] = {`,
+    `    enumerable: true,`,
+    `    get() {`,
+    `      throw new Error(`,
+    `        "schemas." + __name + " is recursive and cannot be inlined. " +`,
+    `        "Import it from 'virtual:fetcher' (ref-aware) or use validators." + __name + " (also from 'virtual:fetcher')."`,
+    `      );`,
+    `    },`,
+    `  };`,
+    `}`,
+    `export const schemas = Object.freeze(Object.create(null, __descriptors));`,
+  ].join('\n');
+}
 
 /**
  * Generates `paths.d.ts` from the OpenAPI spec using the `openapi-typescript`
@@ -272,30 +386,63 @@ function appendSchemaHelper(pathsDtsPath: string): void {
 }
 
 /**
- * Emits `fetcher-env.d.ts` — a module declaration that types the
- * `virtual:fetcher` virtual module. The declaration exports `routes` as
- * `Routes` — a standalone type from `@bajustone/fetcher` with no relative
- * imports, eliminating the `declare module` + relative path fragility that
- * affected SvelteKit and other frameworks.
+ * Emits `fetcher-env.d.ts` — module declarations for the virtual modules
+ * served by this plugin. Uses only types exported from `@bajustone/fetcher`
+ * (no relative imports), eliminating the `declare module` + relative path
+ * fragility that affected SvelteKit and other frameworks.
  *
- * The user should include this file in their `tsconfig.json` `include`
- * array (or it lands there automatically if the output dir is inside `src/`).
+ * When `emitComponents` is true, also declares the `schemas` and `validators`
+ * exports on `virtual:fetcher` and the `schemas` export on
+ * `virtual:fetcher/inlined`. Types are intentionally mutable (not `readonly`)
+ * so consumers typed against mutable arrays (e.g. schemasafe's `required:
+ * string[]`) don't trip on `as const`-style `readonly` inference.
+ *
+ * The user should include this file in their `tsconfig.json` `include` array
+ * (or it lands there automatically if the output dir is inside `src/`).
  */
-function emitEnvDeclaration(envDtsPath: string): void {
-  const content = [
+function emitEnvDeclaration(envDtsPath: string, emitComponents: boolean): void {
+  const lines: string[] = [
     `// Auto-generated by @bajustone/fetcher plugin — do not edit.`,
-    `// Provides type declarations for the virtual:fetcher module.`,
+    `// Provides type declarations for the virtual:fetcher modules.`,
     `// Make sure this file is included in your tsconfig.json.`,
     ``,
     `declare module 'virtual:fetcher' {`,
-    `  import type { Routes } from '@bajustone/fetcher';`,
+    `  import type { JSONSchemaDefinition, Routes, StandardSchemaV1 } from '@bajustone/fetcher';`,
     `  /** Pre-built route schemas for runtime validation. */`,
     `  export const routes: Routes;`,
-    `}`,
-    ``,
-  ].join('\n');
+  ];
 
-  writeFileSync(envDtsPath, content);
+  if (emitComponents) {
+    lines.push(
+      `  /**`,
+      `   * Component schemas (JSON Schema draft-2020-12) with local \`$defs\` + \`$ref\`.`,
+      `   * Drop-in for ref-aware consumers (AJV, TypeBox). For consumers that don't`,
+      `   * resolve \`$ref\` (schemasafe, Zod 4's \`fromJSONSchema\`), use the`,
+      `   * \`virtual:fetcher/inlined\` subpath instead.`,
+      `   */`,
+      `  export const schemas: Record<string, JSONSchemaDefinition>;`,
+      `  /** Standard Schema V1 validators; resolve \`$ref\` at validation time. */`,
+      `  export const validators: Record<string, StandardSchemaV1<unknown, unknown>>;`,
+    );
+  }
+
+  lines.push(`}`, ``);
+
+  if (emitComponents) {
+    lines.push(
+      `declare module 'virtual:fetcher/inlined' {`,
+      `  import type { JSONSchemaDefinition } from '@bajustone/fetcher';`,
+      `  /**`,
+      `   * Fully-flattened component schemas, pre-inlined at plugin time. No \`$ref\`.`,
+      `   * Cyclic components throw on access with an actionable message.`,
+      `   */`,
+      `  export const schemas: Record<string, JSONSchemaDefinition>;`,
+      `}`,
+      ``,
+    );
+  }
+
+  writeFileSync(envDtsPath, lines.join('\n'));
 }
 
 // ---------------------------------------------------------------------------

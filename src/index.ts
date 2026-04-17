@@ -57,12 +57,20 @@
  */
 
 export { createFetch, extractErrorMessage, FetcherRequestError } from './fetcher.ts';
+export { inline } from './inline.ts';
 export { JSONSchemaValidator, ValidationError } from './json-schema-validator.ts';
 export type { JSONSchemaDefinition } from './json-schema-validator.ts';
 export { authBearer, bearerWithRefresh, retry, timeout } from './middleware.ts';
 export type { BearerWithRefreshOptions } from './middleware.ts';
 
-export { extractRouteSchemas, fromOpenAPI } from './openapi.ts';
+export {
+  bundleComponent,
+  extractComponentSchemas,
+  extractRouteSchemas,
+  fromOpenAPI,
+  JSON_SCHEMA_DIALECT,
+  translateDialect,
+} from './openapi.ts';
 export type { ExtractedRouteSchemas } from './openapi.ts';
 
 export { coverage, lintSpec } from './spec-tools.ts';

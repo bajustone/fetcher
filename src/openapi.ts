@@ -191,6 +191,203 @@ export function fromOpenAPI<const Spec extends OpenAPISpec>(
   return routes as InferRoutesFromSpec<Spec>;
 }
 
+/**
+ * JSON Schema draft-2020-12 dialect marker emitted on each bundled component.
+ */
+export const JSON_SCHEMA_DIALECT = 'https://json-schema.org/draft/2020-12/schema';
+
+/**
+ * Translates OpenAPI 3.0 dialect keywords to their JSON Schema draft-2020-12
+ * equivalents, recursively. Returns a new object — input is not mutated.
+ *
+ * - `nullable: true` → add `'null'` to the `type` array
+ * - `exclusiveMinimum: true` + `minimum: X` (Draft 4 boolean) → `exclusiveMinimum: X` (numeric)
+ * - `exclusiveMaximum: true` + `maximum: X` → `exclusiveMaximum: X`
+ * - `example: X` → `examples: [X]` (unless `examples` already present)
+ * - Drops `xml`, `externalDocs` (presentation-only, not validation)
+ * - Leaves `discriminator`, `readOnly`, `writeOnly` intact
+ */
+export function translateDialect(
+  schema: JSONSchemaDefinition,
+): JSONSchemaDefinition {
+  return translateNode(schema) as JSONSchemaDefinition;
+}
+
+function translateNode(node: unknown): unknown {
+  if (node === null || typeof node !== 'object')
+    return node;
+  if (Array.isArray(node))
+    return node.map(translateNode);
+
+  const src = node as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(src)) {
+    // Drop OpenAPI-only presentation keywords
+    if (key === 'xml' || key === 'externalDocs')
+      continue;
+    // `nullable` is handled below
+    if (key === 'nullable')
+      continue;
+    // `example` is handled below
+    if (key === 'example')
+      continue;
+    // Boolean `exclusiveMinimum`/`exclusiveMaximum` (Draft 4) is handled below
+    if ((key === 'exclusiveMinimum' || key === 'exclusiveMaximum') && typeof value === 'boolean')
+      continue;
+    out[key] = translateNode(value);
+  }
+
+  // nullable: true → add 'null' to type
+  if (src.nullable === true) {
+    const currentType = out.type;
+    if (Array.isArray(currentType)) {
+      if (!currentType.includes('null'))
+        out.type = [...currentType, 'null'];
+    }
+    else if (typeof currentType === 'string') {
+      out.type = [currentType, 'null'];
+    }
+    // If no type, leave as-is — nullable without type has no draft-2020-12 analogue
+  }
+
+  // Draft 4 boolean exclusiveMinimum/exclusiveMaximum → Draft 6+ numeric
+  if (src.exclusiveMinimum === true && typeof src.minimum === 'number') {
+    out.exclusiveMinimum = src.minimum;
+    delete out.minimum;
+  }
+  if (src.exclusiveMaximum === true && typeof src.maximum === 'number') {
+    out.exclusiveMaximum = src.maximum;
+    delete out.maximum;
+  }
+
+  // example → examples (array), unless examples already present
+  if ('example' in src && !('examples' in out)) {
+    out.examples = [src.example];
+  }
+
+  return out;
+}
+
+/**
+ * Bundles a single component schema into a self-contained JSON Schema
+ * draft-2020-12 document:
+ *
+ * - Collects the transitive closure of `#/components/schemas/*` refs reachable
+ *   from the component.
+ * - Rewrites every ref from `#/components/schemas/X` to `#/$defs/X`.
+ * - Attaches a local `$defs` map with the translated+rewritten reached
+ *   components (omitted if nothing was reached).
+ * - Adds a `$schema` dialect marker.
+ *
+ * Returns `undefined` if the component is not present in the input map.
+ */
+export function bundleComponent(
+  name: string,
+  translatedComponents: Record<string, JSONSchemaDefinition>,
+): JSONSchemaDefinition | undefined {
+  const root = translatedComponents[name];
+  if (!root)
+    return undefined;
+
+  const reached = new Set<string>();
+  collectReached(root, translatedComponents, reached);
+
+  const rootRewritten = rewriteRefs(root) as JSONSchemaDefinition;
+  const bundled: JSONSchemaDefinition = {
+    $schema: JSON_SCHEMA_DIALECT,
+    ...rootRewritten,
+  };
+
+  // Merge — don't overwrite — with any $defs the component already declared
+  // locally (valid in JSON Schema 2020-12 / OpenAPI 3.1).
+  const existingDefs = rootRewritten.$defs;
+  if (reached.size > 0 || existingDefs) {
+    const merged: Record<string, JSONSchemaDefinition> = { ...(existingDefs ?? {}) };
+    for (const reachedName of reached) {
+      const target = translatedComponents[reachedName];
+      if (target)
+        merged[reachedName] = rewriteRefs(target) as JSONSchemaDefinition;
+    }
+    bundled.$defs = merged;
+  }
+
+  return bundled;
+}
+
+function collectReached(
+  node: unknown,
+  components: Record<string, JSONSchemaDefinition>,
+  reached: Set<string>,
+): void {
+  if (node === null || typeof node !== 'object')
+    return;
+  if (Array.isArray(node)) {
+    for (const item of node)
+      collectReached(item, components, reached);
+    return;
+  }
+  const n = node as Record<string, unknown>;
+  if (typeof n.$ref === 'string' && n.$ref.startsWith('#/components/schemas/')) {
+    const target = n.$ref.slice('#/components/schemas/'.length);
+    if (!reached.has(target)) {
+      reached.add(target);
+      if (components[target])
+        collectReached(components[target], components, reached);
+    }
+  }
+  for (const value of Object.values(n)) {
+    if (value !== null && typeof value === 'object')
+      collectReached(value, components, reached);
+  }
+}
+
+function rewriteRefs(node: unknown): unknown {
+  if (node === null || typeof node !== 'object')
+    return node;
+  if (Array.isArray(node))
+    return node.map(rewriteRefs);
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (
+      key === '$ref'
+      && typeof value === 'string'
+      && value.startsWith('#/components/schemas/')
+    ) {
+      out[key] = `#/$defs/${value.slice('#/components/schemas/'.length)}`;
+    }
+    else {
+      out[key] = rewriteRefs(value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Extracts component schemas from an OpenAPI spec, translates each to JSON
+ * Schema draft-2020-12, and bundles each into a self-contained document with
+ * a local `$defs` map containing transitively referenced components.
+ *
+ * The build-time companion to the plugin's `virtual:fetcher` schema export.
+ */
+export function extractComponentSchemas(
+  spec: OpenAPISpec,
+): { schemas: Record<string, JSONSchemaDefinition> } {
+  const rawComponents = spec.components?.schemas ?? {};
+  const translated: Record<string, JSONSchemaDefinition> = {};
+  for (const [name, schema] of Object.entries(rawComponents))
+    translated[name] = translateDialect(schema);
+
+  const schemas: Record<string, JSONSchemaDefinition> = {};
+  for (const name of Object.keys(translated)) {
+    const bundled = bundleComponent(name, translated);
+    if (bundled)
+      schemas[name] = bundled;
+  }
+
+  return { schemas };
+}
+
 /** Build a flat definitions map for $ref resolution */
 function buildDefinitions(
   spec: OpenAPISpec,

@@ -1,0 +1,101 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Dialect 3.1", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "operationId": "listPets",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Pet" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createPet",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Pet" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Pet" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "NullableUser": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "nickname": { "type": ["string", "null"] }
+        }
+      },
+      "BoundedInt": {
+        "type": "integer",
+        "exclusiveMinimum": 0,
+        "exclusiveMaximum": 150
+      },
+      "WithExamples": {
+        "type": "string",
+        "examples": ["active", "dormant"]
+      },
+      "StatusConst": {
+        "type": "string",
+        "const": "active"
+      },
+      "RefWithSiblings": {
+        "description": "A user ref with a sibling description",
+        "$ref": "#/components/schemas/NullableUser"
+      },
+      "WithLocalDefs": {
+        "type": "object",
+        "properties": {
+          "inner": { "$ref": "#/$defs/Inner" }
+        },
+        "$defs": {
+          "Inner": { "type": "string" }
+        }
+      },
+      "WithLocalAndExternalDefs": {
+        "type": "object",
+        "properties": {
+          "inner": { "$ref": "#/$defs/Inner" },
+          "user": { "$ref": "#/components/schemas/NullableUser" }
+        },
+        "$defs": {
+          "Inner": { "type": "string" }
+        }
+      },
+      "Pet": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "tag": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

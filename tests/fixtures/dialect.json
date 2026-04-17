@@ -1,0 +1,76 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Dialect test", "version": "1.0.0" },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "NullableUser": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "nickname": { "type": "string", "nullable": true }
+        }
+      },
+      "BoundedNumber": {
+        "type": "object",
+        "properties": {
+          "age": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "maximum": 150,
+            "exclusiveMaximum": false
+          }
+        }
+      },
+      "WithExample": {
+        "type": "object",
+        "properties": {
+          "tag": { "type": "string", "example": "demo" }
+        },
+        "xml": { "name": "WithExample" },
+        "externalDocs": { "url": "https://example.com" }
+      },
+      "UsesAddress": {
+        "type": "object",
+        "properties": {
+          "address": { "$ref": "#/components/schemas/Address" }
+        }
+      },
+      "Address": {
+        "type": "object",
+        "properties": {
+          "city": { "type": "string" },
+          "country": { "$ref": "#/components/schemas/Country" }
+        }
+      },
+      "Country": {
+        "type": "object",
+        "properties": { "code": { "type": "string" } }
+      },
+      "Tree": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string" },
+          "children": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Tree" }
+          }
+        }
+      },
+      "Node": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string" },
+          "edge": { "$ref": "#/components/schemas/Edge" }
+        }
+      },
+      "Edge": {
+        "type": "object",
+        "properties": {
+          "to": { "$ref": "#/components/schemas/Node" }
+        }
+      }
+    }
+  }
+}

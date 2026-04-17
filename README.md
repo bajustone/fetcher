@@ -187,6 +187,49 @@ import type { components } from './generated/paths';
 type Pet = SchemaOf<components, 'Pet'>;
 ```
 
+#### Component schemas and validators
+
+With the plugin, `virtual:fetcher` also exposes every component schema from the spec — usable with any JSON-Schema-aware tool. Two flavors:
+
+```typescript
+// Spec-canonical: JSON Schema draft-2020-12 with local $defs + $ref
+import { schemas, validators } from 'virtual:fetcher';
+
+// Fully-flattened: $refs resolved at build time (no $ref anywhere)
+import { schemas as inlinedSchemas } from 'virtual:fetcher/inlined';
+```
+
+Pick based on what your consumer accepts:
+
+```typescript
+// AJV / TypeBox / any ref-aware consumer — use the canonical module
+import Ajv from 'ajv/dist/2020';
+import { schemas } from 'virtual:fetcher';
+const ajv = new Ajv();
+ajv.addSchema(schemas.User, 'User');
+
+// sveltekit-superforms schemasafe, Zod 4's fromJSONSchema, rjsf — use /inlined
+import { schemasafe } from 'sveltekit-superforms/adapters';
+import { schemas } from 'virtual:fetcher/inlined';
+const form = await superValidate(schemasafe(schemas.User));
+
+// Zero-dep runtime validation via the bundled JSONSchemaValidator
+import { validators } from 'virtual:fetcher';
+const result = await validators.User['~standard'].validate(input);
+if (!result.issues) handleValid(result.value);
+```
+
+Recursive components (e.g., a tree with self-reference) can only be used via the canonical module — the `/inlined` subpath emits a throwing getter for them with an actionable message. Use `validators.Tree` for runtime validation of recursive types.
+
+For inlining a JSON Schema that didn't come from fetcher (e.g., an external schema you want to drop into `schemasafe`), the core package exports an `inline()` helper — memoized by input identity, throws on cycles:
+
+```typescript
+import { inline } from '@bajustone/fetcher';
+const flat = inline(someExternalSchema);
+```
+
+Opt out entirely with `fetcherPlugin({ spec: ..., components: false })` — only `routes` is exported, no `schemas`/`validators` ship.
+
 #### Spec linting
 
 `lintSpec(spec)` flags every keyword the runtime validator does NOT enforce (e.g., `format: 'email'` types as `string` but runtime accepts non-emails). Run from CI:
