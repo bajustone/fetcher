@@ -45,7 +45,9 @@
  */
 
 export { createFetch, extractErrorMessage, FetcherRequestError } from './fetcher.ts';
+export type { JSONSchemaToType } from './infer-spec.ts';
 export { authBearer, bearerWithRefresh, retry, timeout } from './middleware.ts';
+
 export type { BearerWithRefreshOptions } from './middleware.ts';
 
 export type {

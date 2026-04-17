@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.4.0] - 2026-04-18
+
+Type-level-only release. Closes the long-standing gap where
+`fromOpenAPI(spec)` narrowed paths and methods but left body / response /
+errorResponse types as `unknown` unless the user added
+`openapi-typescript` codegen. `as const`-typed specs now infer through.
+
+### Added
+
+- `JSONSchemaToType<S, Defs>` — walks a JSON Schema literal and produces
+  the TypeScript type of values that satisfy it. Covers the runtime
+  validator's subset: primitives, arrays, objects (with required-split),
+  `enum`, `const`, `anyOf` / `oneOf` → union, `allOf` → intersection,
+  `$ref` against a defs map, and OpenAPI 3.0 `nullable`. Exported from
+  the core package for users who want to type a response manually.
+
+- `InferRoutesFromSpec<S>` now emits typed route definitions when `S` is
+  narrowly typed (typically via `const spec = {...} as const`). Each
+  method's `body`, `response`, and `errorResponse` slots are inferred
+  via `JSONSchemaToType` against the spec's `components.schemas`.
+  `params` and `query` stay as `Schema<unknown>` for now (path params
+  still flow through `ExtractPathParams`).
+
+### Changed
+
+- `src/types.ts` now imports `InferredRouteDefinition` from the new
+  `src/infer-spec.ts` module. Pure type-level; no runtime change.
+
+### Unchanged
+
+- When the spec isn't narrowly typed (e.g. plain
+  `import spec from './openapi.json'`, which widens literals),
+  inference falls back to `unknown`. The codegen path
+  (`openapi-typescript` → `paths.d.ts` → `createFetch<paths>`) remains
+  the recommended approach for large specs — it's mature, keeps
+  TypeScript's conditional-type budget in check, and handles every edge
+  case. Zero-codegen inference is the new alternative, not the
+  replacement.
+
 ## [0.3.0] - 2026-04-18
 
 Non-breaking additions to `@bajustone/fetcher/schema`. Closes the last two

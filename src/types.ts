@@ -7,6 +7,8 @@
  * @module
  */
 
+import type { InferredRouteDefinition } from './infer-spec.ts';
+
 /**
  * A path segment in a Standard Schema V1 issue. Either a property key or a
  * `{ key }` wrapper for keys whose path needs additional metadata.
@@ -291,40 +293,58 @@ type LowercaseHttpMethod = 'get' | 'post' | 'put' | 'delete' | 'patch';
 
 /**
  * Walks the literal type of an OpenAPI spec and produces a narrowed
- * {@link Routes} shape that preserves the spec's path keys and method
- * keys, so `f('/pets/{petId}', { method: 'GET' })` autocompletes the path
- * and narrows the method.
+ * {@link Routes} shape that preserves the spec's path keys, method keys,
+ * and — when the spec is sufficiently narrowly typed — the body / response
+ * / error-response types inferred from its JSON Schemas.
  *
- * **What is inferred (Path A minimum):**
+ * **What is inferred:**
  * - Path keys (e.g. `/pets`, `/pets/{petId}`)
  * - Method keys per path (`GET`, `POST`, etc., uppercased from the spec)
  * - Path parameters from the path template (via `ExtractPathParams`)
+ * - Body / response / errorResponse TS types from the spec's JSON Schemas,
+ *   via {@link JSONSchemaToType}. `$ref` targets resolve against the
+ *   spec's `components.schemas` map.
  *
- * **What is NOT inferred yet:**
- * - Body, response, or errorResponse types from the spec's JSON Schemas.
- *   Each route's schema slots are typed as `RouteDefinition` (all-optional)
- *   so the runtime validators built by `fromOpenAPI` are still active —
- *   you just don't get static `data: T` inference from the spec.
+ * **Practical note:** type-level inference requires the spec to be narrowly
+ * typed — pass an inline `as const` object or a JSON import processed
+ * through a codegen step. Plain `import spec from './openapi.json'`
+ * widens string literals (so `type: 'integer'` becomes `type: string`) and
+ * the schema walker collapses to `unknown`. For large specs, prefer the
+ * codegen path (`openapi-typescript` → `paths.d.ts` → `createFetch<paths>`);
+ * the zero-codegen path trades TypeScript compile time for setup
+ * simplicity.
  *
- * For typed responses today, layer a per-call `responseSchema: z.object(...)`
- * on top — the §4.A1 generic flows the inferred output through to
- * `result.data` regardless of what the route declares.
+ * **What is NOT inferred:** `params` and `query` schemas stay as
+ * `Schema<unknown>` (path params flow through `ExtractPathParams`; query
+ * parameter types aren't walked yet).
  *
- * Body/response inference from the spec is a follow-up: it requires a
- * type-level JSON Schema → TS converter that mirrors the runtime
- * `JSONSchemaValidator`'s supported subset.
+ * @example — zero-codegen inference from an inline const spec
+ * ```ts
+ * const spec = {
+ *   paths: {
+ *     '/pets/{id}': {
+ *       get: {
+ *         responses: {
+ *           '200': {
+ *             content: {
+ *               'application/json': {
+ *                 schema: {
+ *                   type: 'object',
+ *                   properties: { id: { type: 'integer' }, name: { type: 'string' } },
+ *                   required: ['id', 'name'],
+ *                 },
+ *               },
+ *             },
+ *           },
+ *         },
+ *       },
+ *     },
+ *   },
+ * } as const;
  *
- * @example
- * ```typescript
- * import spec from './openapi.json';
- *
- * const f = createFetch({
- *   baseUrl: 'https://api.example.com',
- *   routes: fromOpenAPI(spec), // routes type is narrowed to spec literals
- * });
- *
- * f('/pets', { method: 'GET' });        // path autocompletes
- * f('/pets/{petId}', { method: 'GET', params: { petId: '42' } });
+ * const f = createFetch({ baseUrl: '...', routes: fromOpenAPI(spec) });
+ * const r = await f.get('/pets/{id}', { params: { id: '1' } }).result();
+ * if (r.ok) r.data.name; // typed: string
  * ```
  */
 export type InferRoutesFromSpec<S>
@@ -332,11 +352,15 @@ export type InferRoutesFromSpec<S>
     ? Paths extends Record<string, unknown>
       ? {
           [P in keyof Paths & string]: {
-            [M in keyof Paths[P] & LowercaseHttpMethod as Uppercase<M>]: RouteDefinition;
+            [M in keyof Paths[P] & LowercaseHttpMethod as Uppercase<M>]:
+            InferredRouteDefinition<Paths[P][M], GetSpecDefs<S>>;
           };
         }
       : Routes
     : Routes;
+
+type GetSpecDefs<S>
+  = S extends { components: { schemas: infer D } } ? D : object;
 
 // ---------------------------------------------------------------------------
 // OpenAPI paths inference (D6 — typed body/response from generated `paths`)

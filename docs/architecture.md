@@ -74,15 +74,15 @@ The runtime validator enforces a deliberately small subset (see the supported-ke
 
 `lintSpec(spec)` (from `@bajustone/fetcher/spec-tools`) returns one `SpecDriftIssue` per drift point with an RFC 6901 JSON pointer, the unsupported keyword, a `'warn'` / `'info'` severity, and a message. Run from CI to fail builds on silent drift.
 
-#### Why no zero-codegen OpenAPI inference?
+#### Zero-codegen inference (for narrow specs)
 
-TypeScript intentionally widens string values when importing JSON files (`resolveJsonModule`, `with { type: 'json' }` — both widen). A schema like `{ "type": "integer" }` imports as `{ type: string }`, not `{ type: 'integer' }`. A type-level `JSONSchemaToType<S>` converter cannot discriminate between schema kinds without literal types on the `type` field — it collapses to `unknown` for every leaf.
+As of v0.4.0 fetcher ships `JSONSchemaToType<Schema, Defs>` and extends `InferRoutesFromSpec<S>` to walk a spec's JSON Schemas at the type level. When the spec is narrowly typed (typically via `const spec = {...} as const`), body / response / errorResponse types flow through without any codegen step.
 
-The widening is intentional per the TypeScript team ([microsoft/TypeScript#27913](https://github.com/Microsoft/TypeScript/issues/27913)). The proposal for literal-preserving JSON imports has been open since 2019 ([microsoft/TypeScript#32063](https://github.com/microsoft/TypeScript/issues/32063)) with no commitment. Every workaround re-introduces a build step (`.d.json.ts` declaration files, TypeScript transformer plugins, pasting the spec into a `.ts` file with `as const`).
+Why not always use this path? Because a plain `import spec from './openapi.json'` widens string literals — TypeScript's `resolveJsonModule` / `with { type: 'json' }` both widen ([microsoft/TypeScript#27913](https://github.com/Microsoft/TypeScript/issues/27913); preservation proposal open at [#32063](https://github.com/microsoft/TypeScript/issues/32063)). Once widened, `type: 'integer'` becomes `type: string` and the spec-walker can't discriminate schema kinds.
 
-Given that every alternative is a form of codegen, the question becomes: fetcher's custom converter vs `openapi-typescript`'s mature one. `openapi-typescript` wins — it handles `oneOf` / `allOf` / recursive `$ref` / discriminated unions / large specs. The `<paths>` flow is the right shape.
+For large specs, the `openapi-typescript` codegen path is still the right call: mature, handles every edge case (`oneOf` / `allOf` / recursive `$ref` / discriminated unions), and keeps TypeScript's conditional-type performance budget in check. The zero-codegen path is an addition for small specs and prototypes — not a replacement.
 
-If TypeScript ever ships [#32063](https://github.com/microsoft/TypeScript/issues/32063), this section becomes obsolete and zero-codegen inference becomes worth revisiting.
+If TypeScript ever ships [#32063](https://github.com/microsoft/TypeScript/issues/32063), the widening limitation goes away and the zero-codegen path becomes viable for arbitrary JSON-imported specs too.
 
 ### Mode 2: Manual Route Schemas
 

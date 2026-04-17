@@ -171,6 +171,50 @@ Add a `package.json` script so types stay in sync with the spec:
 }
 ```
 
+#### Option C: Zero-codegen (inline `as const` spec)
+
+For small specs or prototypes, you can skip `openapi-typescript` entirely and let fetcher walk the spec at the type level. Works when the spec is narrowly typed — typically by pasting it into a `.ts` file with `as const`:
+
+```typescript
+import { createFetch } from '@bajustone/fetcher';
+import { fromOpenAPI } from '@bajustone/fetcher/openapi';
+
+const spec = {
+  paths: {
+    '/pets/{id}': {
+      get: {
+        responses: {
+          200: {
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/Pet' },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  components: {
+    schemas: {
+      Pet: {
+        type: 'object',
+        properties: { id: { type: 'integer' }, name: { type: 'string' } },
+        required: ['id', 'name'],
+      },
+    },
+  },
+} as const;
+
+const f = createFetch({ baseUrl: '...', routes: fromOpenAPI(spec) });
+const r = await f.get('/pets/{id}', { params: { id: '1' } }).result();
+if (r.ok) r.data.name; // typed: string
+```
+
+`as const` is load-bearing — without it, TypeScript widens string literals (so `type: 'integer'` becomes `type: string`) and the spec-walker collapses to `unknown`. Plain `import spec from './openapi.json'` also widens. For large specs, the `openapi-typescript` codegen path is still the right call — it's mature, handles every edge case, and keeps TypeScript's conditional-type budget under control. This zero-codegen path is an addition, not a replacement.
+
+`JSONSchemaToType<Schema, Defs?>` is exported from the core package if you want to type a response manually without round-tripping through `InferRoutesFromSpec`.
+
 #### Extracting component schema types
 
 When the plugin generates `paths.d.ts`, it appends a pre-applied `Schema` helper (if the spec has `components.schemas`):
