@@ -273,15 +273,15 @@ Each route in `report.routes` includes `bodyTyped`, `responseTyped`, `errorTyped
 
 ```typescript
 import { createFetch } from '@bajustone/fetcher';
-import { z } from 'zod';
+import { object, string } from '@bajustone/fetcher/schema';
 
 const f = createFetch({
   baseUrl: 'https://api.example.com',
   routes: {
     '/users/{id}': {
       GET: {
-        params: z.object({ id: z.string() }),
-        response: z.object({ id: z.string(), name: z.string() }),
+        params: object({ id: string() }),
+        response: object({ id: string(), name: string() }),
       },
     },
   },
@@ -293,7 +293,7 @@ if (result.ok) {
 }
 ```
 
-Any Standard Schema V1 schema works — Zod 3.24+, Valibot, ArkType all qualify natively.
+Any Standard Schema V1 schema works — the bundled `@bajustone/fetcher/schema` builder shown above, Zod 3.24+, Valibot, ArkType, or any value with a `~standard.validate` property. See [Native schema builder](#native-schema-builder) below for the full builder surface.
 
 ### 3. Ad-hoc per-call schema
 
@@ -310,6 +310,122 @@ if (result.ok) {
 ```
 
 The per-call `responseSchema` wins over any route-declared `response`.
+
+## Native schema builder
+
+`@bajustone/fetcher/schema` ships a JSON-Schema-producing builder with pre-compiled validators. Factories return plain JSON Schema objects with a `~standard.validate` closure baked in at construction time — no runtime interpreter, no class hierarchy, no external dependencies. Drop straight into any `RouteDefinition` slot.
+
+```typescript
+import {
+  array,
+  email,
+  integer,
+  object,
+  optional,
+  string,
+} from '@bajustone/fetcher/schema';
+import type { Infer } from '@bajustone/fetcher/schema';
+
+const Pet = object({
+  id:    integer(),
+  name:  string({ minLength: 1 }),
+  email: email(),                 // { type: 'string', format: 'email', pattern: <regex> }
+  tags:  array(string()),
+  owner: optional(string()),
+});
+
+type Pet = Infer<typeof Pet>;
+// { id: number; name: string; email: string; tags: string[]; owner?: string }
+```
+
+Every factory is annotated `/*@__NO_SIDE_EFFECTS__*/`, so a bundler eliminates any factory whose result is unused. Bundle cost is pay-as-used — importing only `string` produces a ~330 B gzipped fixture; a typical `object({ id: integer(), name: string() })` schema lands around 800 B gzipped.
+
+### What's in the box
+
+| Category | Factories |
+|---|---|
+| Primitives | `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown` |
+| Composites | `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_` |
+| Tagged | `discriminatedUnion(key, { tag: variant })` — O(1) dispatch by property lookup |
+| Refs | `ref(name)` + `compile(schema, defs)` — lazy, cycle-safe binding |
+| Formats | `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern` |
+
+### Discriminated unions
+
+```typescript
+import { discriminatedUnion, literal, number, object } from '@bajustone/fetcher/schema';
+
+const Shape = discriminatedUnion('kind', {
+  circle: object({ kind: literal('circle' as const), radius: number() }),
+  square: object({ kind: literal('square' as const), side: number() }),
+});
+
+// Dispatches by the `kind` property; unknown tags fail fast with
+// { message: 'Unknown discriminator', path: ['kind'] }
+// TypeScript narrowing via `kind` works naturally:
+type ShapeValue = Infer<typeof Shape>;
+function area(s: ShapeValue) {
+  if (s.kind === 'circle') return Math.PI * s.radius ** 2;
+  return s.side ** 2;
+}
+```
+
+### Recursive schemas
+
+```typescript
+import { array, compile, number, object, ref } from '@bajustone/fetcher/schema';
+
+interface TreeNode { value: number; children: TreeNode[] }
+
+const Tree = object({
+  value:    number(),
+  children: array(ref<TreeNode>('Tree')),
+});
+
+compile(Tree, { Tree });
+// lazy-binds the ref; the resolver caches on first call.
+// Self-references terminate on input depth, not construction depth.
+```
+
+`compile` walks the tree once and rebinds every ref node to a lazy resolver closed over its target. Mutual recursion works the same way — pass multiple entries in `defs`.
+
+### Custom patterns and format helpers
+
+```typescript
+import { string } from '@bajustone/fetcher/schema';
+
+const Slug = string({ minLength: 1, maxLength: 64, pattern: '^[a-z0-9-]+$' });
+const E164 = string({ pattern: '^\\+[1-9]\\d{1,14}$' });
+```
+
+Format helpers (`email()`, `url()`, etc.) always pair the `format` keyword with a runtime-enforcing `pattern` — closing the gap where most validators tag `format: 'email'` but accept any string at runtime.
+
+### Bridging raw JSON Schema
+
+When you already have a JSON Schema object — from an OpenAPI spec, a legacy source, or `virtual:fetcher`'s generated component schemas — use `fromJSONSchema` from `@bajustone/fetcher/openapi` to produce the same pre-compiled validator:
+
+```typescript
+import { fromJSONSchema } from '@bajustone/fetcher/openapi';
+
+const User = fromJSONSchema<{ id: number; name: string }>({
+  type: 'object',
+  properties: { id: { type: 'integer' }, name: { type: 'string' } },
+  required: ['id', 'name'],
+});
+```
+
+`fromJSONSchema` dispatches each keyword to the matching builder factory, so the result tree-shakes identically.
+
+### What's intentionally out of scope
+
+The builder exposes only keywords the runtime can enforce. If you need any of these, reach for Zod / Valibot / ArkType — they all drop in via Standard Schema V1.
+
+- **No transforms** — `.refine()`, `.transform()`, `.pipe()`, `.preprocess()`, `.coerce()`, `.default()`, `.catch()`. The builder validates wire data as-is.
+- **No compositional sugar** — `.extend()`, `.partial()`, `.pick()`, `.omit()`, `.merge()`. Define the target shape directly.
+- **No narrow numeric constraints** — `multipleOf`, `exclusiveMinimum`/`exclusiveMaximum`. Only `minimum` / `maximum`.
+- **No object keywords beyond `required` / `properties`** — no `patternProperties`, `propertyNames`, or sub-schema `additionalProperties`.
+- **No conditional schemas** — `if` / `then` / `else`, `dependentSchemas`, `dependentRequired`.
+- **No array tuples** — `prefixItems`, `contains`, `uniqueItems`.
 
 ## Result and error model
 
