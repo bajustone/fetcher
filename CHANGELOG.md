@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.15] - 2026-04-17
+
+### Added
+- clean docs
+- add component schemas + validators to virtual:fetcher
+
 ## [0.0.14] - 2026-04-11
 
 ### Fixed
