@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0] - 2026-04-18
+
+Non-breaking ergonomics release. Adds the top-level `parse()` function
+users coming from Zod expect.
+
+### Added
+
+- `parse(schema, data)` — thin wrapper over
+  `schema['~standard'].validate(data)`. Returns the native Standard
+  Schema V1 result (`{ value } | { issues }`). Never throws. Works with
+  the bundled builder, Zod, Valibot, ArkType, or any Standard Schema V1
+  validator.
+- `parseOrThrow(schema, data)` — returns the validated value on success,
+  throws `SchemaValidationError` carrying the raw `issues` on failure.
+  Sync only — for async validators, `await schema['~standard'].validate(data)`
+  directly. Matches fetcher's `.unwrap()` philosophy (throwing form for
+  server code).
+- `SchemaValidationError` — `Error` subclass with `.issues` field. Its
+  `.message` is the `formatIssues` output of the underlying issues.
+
+Standalone functions, not methods — preserves per-factory tree-shaking.
+Exported from `@bajustone/fetcher/schema`.
+
+### Bundle impact
+
+- Core and other subpaths unchanged.
+- `./schema` wholesale: ~3.0 → ~3.1 KB gz (~80 B gz for the three exports).
+
 ## [0.4.0] - 2026-04-18
 
 Type-level-only release. Closes the long-standing gap where

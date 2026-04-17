@@ -34,6 +34,8 @@ import {
   object,
   omit,
   optional,
+  parse,
+  parseOrThrow,
   partial,
   pick,
   positive,
@@ -42,6 +44,7 @@ import {
   refined,
   required,
   safe,
+  SchemaValidationError,
   string,
   time,
   title,
@@ -594,6 +597,71 @@ describe('default_', () => {
   it('exposes default in JSON Schema output', () => {
     const D = default_(string(), 'x');
     expect((D as unknown as { default: string }).default).toBe('x');
+  });
+});
+
+describe('parse', () => {
+  it('returns { value } on success', () => {
+    const r = parse(string(), 'hello');
+    expect((r as { value: string }).value).toBe('hello');
+  });
+
+  it('returns { issues } on failure', () => {
+    const r = parse(string(), 42);
+    expect((r as { issues: unknown[] }).issues).toBeDefined();
+  });
+
+  it('is a thin wrapper — same result shape as ~standard.validate', () => {
+    const s = object({ id: integer() });
+    const viaParse = parse(s, { id: 1 });
+    const viaDirect = s['~standard'].validate({ id: 1 });
+    expect(viaParse).toEqual(viaDirect);
+  });
+});
+
+describe('parseOrThrow', () => {
+  it('returns the value on success', () => {
+    const v = parseOrThrow(string(), 'hello');
+    expect(v).toBe('hello');
+  });
+
+  it('throws SchemaValidationError on failure', () => {
+    expect(() => parseOrThrow(string(), 42)).toThrow(SchemaValidationError);
+  });
+
+  it('SchemaValidationError carries the raw issues array', () => {
+    try {
+      parseOrThrow(object({ name: string() }), {});
+      throw new Error('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(SchemaValidationError);
+      const e = err as SchemaValidationError;
+      expect(e.issues.length).toBeGreaterThan(0);
+      expect(e.issues[0]!.code).toBe('missing');
+    }
+  });
+
+  it('SchemaValidationError.message is the formatted issue string', () => {
+    try {
+      parseOrThrow(object({ email: string({ pattern: '^.+@.+$' }) }), { email: 'bad' });
+      throw new Error('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(SchemaValidationError);
+      expect((err as SchemaValidationError).message).toBe('email: Pattern mismatch');
+    }
+  });
+
+  it('throws TypeError if schema returns a Promise', () => {
+    const asyncSchema = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'test',
+        validate: () => Promise.resolve({ value: 'x' }),
+      },
+    };
+    expect(() => parseOrThrow(asyncSchema, 'x')).toThrow(TypeError);
   });
 });
 

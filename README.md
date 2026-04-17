@@ -403,7 +403,7 @@ Every factory is annotated `/*@__NO_SIDE_EFFECTS__*/`, so a bundler eliminates a
 | Refs | `ref(name)` + `compile(schema, defs)` — lazy, cycle-safe binding |
 | Formats | `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern` |
 | Meta | `brand<B>()`, `describe(schema, text)`, `title(schema, text)` |
-| Errors | `formatIssues(issues, opts?)` display helper |
+| Parsing & errors | `parse(schema, data)`, `parseOrThrow(schema, data)`, `SchemaValidationError`, `formatIssues(issues, opts?)` |
 
 ### Discriminated unions
 
@@ -503,6 +503,31 @@ if (r.issues) console.error(formatIssues(r.issues));
 ```
 
 Optional `{ separator, pathJoiner, pathMessageSeparator }` for custom formatting. Every builder-emitted issue also carries a stable snake_case `code` (`expected_string`, `too_short`, `missing`, `refine_failed`, …) for i18n or structured error mapping.
+
+### Parsing in one line
+
+For the common case, `parse` / `parseOrThrow` wrap `schema['~standard'].validate(data)`:
+
+```typescript
+import { parse, parseOrThrow, SchemaValidationError } from '@bajustone/fetcher/schema';
+
+// Never throws — returns the native result union.
+const r = parse(Pet, data);
+if (r.issues) console.error(r.issues);
+else use(r.value);
+
+// Throws SchemaValidationError on failure — for server code that wants
+// exceptions as control flow.
+try {
+  const pet = parseOrThrow(Pet, data);
+  use(pet);
+}
+catch (err) {
+  if (err instanceof SchemaValidationError) console.error(err.issues);
+}
+```
+
+Both are standalone functions (not methods) and work with any Standard Schema V1 validator — the bundled builder, Zod, Valibot, ArkType. `parseOrThrow` is synchronous; for async validators, `await schema['~standard'].validate(data)` directly.
 
 ### What's intentionally out of scope
 
@@ -779,6 +804,9 @@ export async function load({ fetch }) {
 | `email`, `url`, `uuid`, `datetime`, `date`, `time` | Format helpers — emit `format` + enforcing `pattern`. |
 | `brand<B>()`, `describe`, `title` | Type-level brand + JSON Schema annotations. |
 | `formatIssues(issues, opts?)` | Display helper for issue arrays. |
+| `parse(schema, data)` | Validate and return `{ value } \| { issues }`. Never throws. |
+| `parseOrThrow(schema, data)` | Validate; return value or throw `SchemaValidationError`. Sync only. |
+| `SchemaValidationError` | Error thrown by `parseOrThrow`. Carries `.issues`. |
 | `Infer<typeof X>` | Extract the validated output type. |
 
 ### OpenAPI / JSON Schema (`@bajustone/fetcher/openapi`)

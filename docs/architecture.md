@@ -222,6 +222,7 @@ Produces plain JSON Schema objects augmented with a pre-compiled `~standard.vali
 - **Formats:** `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern`.
 - **Meta:** `brand<B>()(schema)` for nominal typing; `describe(schema, text)` / `title(schema, text)` for JSON Schema annotations.
 - **Errors:** `formatIssues(issues, opts?)` for flat display; every builder-emitted issue carries a stable snake_case `code`.
+- **Parsing:** `parse(schema, data)` returns the native `{ value } | { issues }` result. `parseOrThrow(schema, data)` returns the validated value or throws `SchemaValidationError` carrying the issues. Standalone functions (not methods) — preserves per-factory tree-shaking.
 
 Each schema satisfies `StandardSchemaV1<unknown, T>` structurally, so it drops directly into any `RouteDefinition` slot. Inference via `Infer<typeof Pet>`. Every builder-emitted validation issue carries a stable snake_case `code` (`expected_string`, `too_short`, `missing`, `unknown_discriminator`, `unresolved_ref`, etc.) alongside the human-readable `message`.
 

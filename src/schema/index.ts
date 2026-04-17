@@ -60,6 +60,8 @@ export { brand, describe, title } from './meta.ts';
 
 export type { Brand } from './meta.ts';
 
+export { parse, parseOrThrow, SchemaValidationError } from './parse.ts';
+
 export {
   any_,
   bigint_,
