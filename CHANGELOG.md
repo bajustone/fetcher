@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.1.0] - 2026-04-17
+
+First breaking release. Adds a native, tree-shakeable schema builder and
+splits the package into subpaths. Core shrinks from 7.2 KB → **2.7 KB gzipped**.
+
+### Added
+- `@bajustone/fetcher/schema` — native schema builder with compile-on-construction
+  validators. Exports `string`, `number`, `integer`, `boolean`, `null_`, `literal`,
+  `unknown`, `object`, `array`, `optional`, `nullable`, `union`, `intersect`,
+  `enum_`, `discriminatedUnion`, `ref` + `compile` (lazy, cycle-safe $ref binding),
+  and format helpers (`email`, `url`, `uuid`, `datetime`, `date`, `time`). Every
+  factory is `@__NO_SIDE_EFFECTS__`-annotated; importing only `string` lands at
+  **327 B gzipped**.
+- `@bajustone/fetcher/openapi` subpath — `fromOpenAPI`, `fromJSONSchema` (raw
+  JSON Schema → compiled builder), `inline`, `extractRouteSchemas`,
+  `extractComponentSchemas`, `bundleComponent`, `translateDialect`,
+  `JSONSchemaDefinition`.
+- `@bajustone/fetcher/spec-tools` subpath — `coverage`, `lintSpec`.
+
+### Changed
+- Validation now happens via pre-compiled closures captured at schema construction,
+  not by walking a schema object at runtime. Short literal error messages
+  (`Expected string`, `Too short`, `Missing`, etc.) for better gzip density.
+- Vite plugin's `virtual:fetcher` now emits
+  `import { fromJSONSchema } from '@bajustone/fetcher/openapi'` and compiles
+  validators via the builder. No user-facing surface change.
+- `fromOpenAPI` output: each body/params/query/response/errorResponse slot is
+  now a compiled builder validator (same `~standard` shape as before).
+
+### Removed (breaking)
+- `JSONSchemaValidator` class and `ValidationError` class — deleted. Use
+  `fromJSONSchema(schema)` for raw JSON Schema, or the native builder for
+  hand-authored schemas.
+- `fromOpenAPI`, `extractRouteSchemas`, `extractComponentSchemas`,
+  `bundleComponent`, `translateDialect`, `JSON_SCHEMA_DIALECT`,
+  `ExtractedRouteSchemas`, `JSONSchemaDefinition`, `inline` — moved from
+  the root entry to `@bajustone/fetcher/openapi`.
+- `coverage`, `lintSpec`, `RouteCoverage`, `SpecCoverageReport`,
+  `SpecDriftIssue` — moved to `@bajustone/fetcher/spec-tools`.
+
+### Migration
+
+```ts
+// Before
+import { JSONSchemaValidator, fromOpenAPI, inline, coverage } from '@bajustone/fetcher';
+const v = new JSONSchemaValidator(schema);
+
+// After
+import { fromJSONSchema, fromOpenAPI, inline } from '@bajustone/fetcher/openapi';
+import { coverage } from '@bajustone/fetcher/spec-tools';
+const v = fromJSONSchema(schema);
+
+// New — native builder
+import { object, string, integer, optional } from '@bajustone/fetcher/schema';
+const Pet = object({ id: integer(), name: string(), tag: optional(string()) });
+```
+
 ## [0.0.15] - 2026-04-17
 
 ### Added
