@@ -208,10 +208,10 @@ import { schemas } from 'virtual:fetcher';
 const ajv = new Ajv();
 ajv.addSchema(schemas.User, 'User');
 
-// sveltekit-superforms schemasafe, Zod 4's fromJSONSchema, rjsf — use /inlined
-import { schemasafe } from 'sveltekit-superforms/adapters';
+// Zod 4's fromJSONSchema, or any consumer that doesn't resolve $ref — use /inlined
+import { z } from 'zod';
 import { schemas } from 'virtual:fetcher/inlined';
-const form = await superValidate(schemasafe(schemas.User));
+const User = z.fromJSONSchema(schemas.User);
 
 // Zero-dep runtime validation via the bundled JSONSchemaValidator
 import { validators } from 'virtual:fetcher';
@@ -221,7 +221,7 @@ if (!result.issues) handleValid(result.value);
 
 Recursive components (e.g., a tree with self-reference) can only be used via the canonical module — the `/inlined` subpath emits a throwing getter for them with an actionable message. Use `validators.Tree` for runtime validation of recursive types.
 
-For inlining a JSON Schema that didn't come from fetcher (e.g., an external schema you want to drop into `schemasafe`), the core package exports an `inline()` helper — memoized by input identity, throws on cycles:
+For inlining a JSON Schema that didn't come from fetcher (e.g., an external schema you want to drop into a consumer that doesn't resolve `$ref`), the core package exports an `inline()` helper — memoized by input identity, throws on cycles:
 
 ```typescript
 import { inline } from '@bajustone/fetcher';
