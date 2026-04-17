@@ -61,9 +61,18 @@ describe('fetcherPlugin', () => {
       expect(content).toMatch(/from '@bajustone\/fetcher'/);
       expect(content).toContain('export const routes: Routes');
       // Components enabled by default: schemas + validators declared on
-      // virtual:fetcher, schemas on virtual:fetcher/inlined
-      expect(content).toContain('export const schemas: Record<string, JSONSchemaDefinition>');
-      expect(content).toContain('export const validators: Record<string, StandardSchemaV1<unknown, unknown>>');
+      // virtual:fetcher with literal-keyed names (not Record<string, ...>),
+      // so schemas.Nonexistent is a compile error and IDEs autocomplete
+      // component names.
+      expect(content).toContain('export const schemas: {');
+      expect(content).toContain('"Pet": JSONSchemaDefinition;');
+      expect(content).toContain('"Error": JSONSchemaDefinition;');
+      expect(content).toContain('export const validators: {');
+      expect(content).toContain('"Pet": StandardSchemaV1<unknown, unknown>;');
+      expect(content).toContain('"Error": StandardSchemaV1<unknown, unknown>;');
+      // Regression guard: the old Record<...> shape is gone
+      expect(content).not.toContain('Record<string, JSONSchemaDefinition>');
+      expect(content).not.toContain('Record<string, StandardSchemaV1<unknown, unknown>>');
       expect(content).toContain('declare module \'virtual:fetcher/inlined\'');
       // No relative paths import — eliminates SvelteKit fragility
       expect(content).not.toContain('from \'./paths\'');
