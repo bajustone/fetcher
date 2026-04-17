@@ -250,7 +250,7 @@ function buildCanonicalModule(rawSpec: unknown, emitComponents: boolean): string
   const { definitions, routes } = extractRouteSchemas(rawSpec as Parameters<typeof extractRouteSchemas>[0]);
 
   const parts: string[] = [
-    `import { JSONSchemaValidator } from '@bajustone/fetcher';`,
+    `import { fromJSONSchema } from '@bajustone/fetcher/openapi';`,
     `const __defs = ${JSON.stringify(definitions)};`,
     `const __routes = ${JSON.stringify(routes)};`,
     `function __buildRoutes(extracted, defs) {`,
@@ -260,7 +260,7 @@ function buildCanonicalModule(rawSpec: unknown, emitComponents: boolean): string
     `    for (const [method, schemas] of Object.entries(methods)) {`,
     `      const d = {};`,
     `      for (const [key, schema] of Object.entries(schemas)) {`,
-    `        d[key] = new JSONSchemaValidator(schema, defs);`,
+    `        d[key] = fromJSONSchema(schema, defs);`,
     `      }`,
     `      r[path][method] = d;`,
     `    }`,
@@ -281,9 +281,9 @@ function buildCanonicalModule(rawSpec: unknown, emitComponents: boolean): string
       `  __validatorDescriptors[__name] = {`,
       `    enumerable: true,`,
       `    get() {`,
-      `      return __validatorCache[__name] ??= new JSONSchemaValidator(`,
+      `      return __validatorCache[__name] ??= fromJSONSchema(`,
       `        __components[__name],`,
-      `        { $defs: __components[__name].$defs ?? {} },`,
+      `        __components[__name].$defs ?? {},`,
       `      );`,
       `    },`,
       `  };`,
@@ -432,7 +432,8 @@ function emitEnvDeclaration(
     `// Make sure this file is included in your tsconfig.json.`,
     ``,
     `declare module 'virtual:fetcher' {`,
-    `  import type { JSONSchemaDefinition, Routes, StandardSchemaV1 } from '@bajustone/fetcher';`,
+    `  import type { Routes, StandardSchemaV1 } from '@bajustone/fetcher';`,
+    `  import type { JSONSchemaDefinition } from '@bajustone/fetcher/openapi';`,
     `  /** Pre-built route schemas for runtime validation. */`,
     `  export const routes: Routes;`,
   ];
@@ -460,7 +461,7 @@ function emitEnvDeclaration(
   if (emitComponents) {
     lines.push(
       `declare module 'virtual:fetcher/inlined' {`,
-      `  import type { JSONSchemaDefinition } from '@bajustone/fetcher';`,
+      `  import type { JSONSchemaDefinition } from '@bajustone/fetcher/openapi';`,
       `  /**`,
       `   * Fully-flattened component schemas, pre-inlined at plugin time. No \`$ref\`.`,
       `   * Cyclic components throw on access with an actionable message.`,

@@ -57,8 +57,8 @@ describe('fetcherPlugin', () => {
 
       const content = readFileSync(envDts, 'utf-8');
       expect(content).toContain('declare module \'virtual:fetcher\'');
-      // Imports all come from '@bajustone/fetcher' — no relative paths
-      expect(content).toMatch(/from '@bajustone\/fetcher'/);
+      // Imports come from '@bajustone/fetcher' and its subpaths — no relative paths
+      expect(content).toMatch(/from '@bajustone\/fetcher(\/[a-z-]+)?'/);
       expect(content).toContain('export const routes: Routes');
       // Components enabled by default: schemas + validators declared on
       // virtual:fetcher with literal-keyed names (not Record<string, ...>),
@@ -100,7 +100,7 @@ describe('fetcherPlugin', () => {
     it('returns the virtual module code for the resolved virtual ID', () => {
       const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher');
       expect(code).not.toBeNull();
-      expect(code).toContain('import { JSONSchemaValidator } from \'@bajustone/fetcher\'');
+      expect(code).toContain('import { fromJSONSchema } from \'@bajustone/fetcher/openapi\'');
       expect(code).toContain('export const routes');
       expect(code).toContain('__buildRoutes');
       // Should NOT contain a pre-built client — user creates their own
@@ -237,10 +237,10 @@ describe('extractRouteSchemas', () => {
 
   it('extracts definitions from components.schemas', () => {
     const result = extractRouteSchemas(spec);
-    const pet = (result.definitions as Record<string, any>).components?.schemas?.Pet;
+    const pet = result.definitions.Pet;
     expect(pet).toBeDefined();
-    expect(pet.type).toBe('object');
-    expect(pet.properties.name).toEqual({ type: 'string' });
+    expect(pet!.type).toBe('object');
+    expect(pet!.properties!.name).toEqual({ type: 'string' });
   });
 
   it('does not include spec metadata', () => {

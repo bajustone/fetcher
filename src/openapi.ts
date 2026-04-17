@@ -6,9 +6,9 @@
  * @module
  */
 
-import type { JSONSchemaDefinition } from './json-schema-validator.ts';
+import type { JSONSchemaDefinition } from './json-schema-types.ts';
 import type { HttpMethod, InferRoutesFromSpec, RouteDefinition, Routes } from './types.ts';
-import { JSONSchemaValidator } from './json-schema-validator.ts';
+import { fromJSONSchema } from './from-json-schema.ts';
 
 /**
  * Raw schema data extracted from an OpenAPI spec — the build-time
@@ -146,36 +146,30 @@ export function fromOpenAPI<const Spec extends OpenAPISpec>(
       // Request body schema
       const bodySchema = extractBodySchema(operation);
       if (bodySchema) {
-        routeDef.body = new JSONSchemaValidator(bodySchema, definitions);
+        routeDef.body = fromJSONSchema(bodySchema, definitions);
       }
 
       // Response schema (first 2xx response)
       const responseSchema = extractResponseSchema(operation);
       if (responseSchema) {
-        routeDef.response = new JSONSchemaValidator(
-          responseSchema,
-          definitions,
-        );
+        routeDef.response = fromJSONSchema(responseSchema, definitions);
       }
 
       // Error response schema (first 4xx/5xx)
       const errorSchema = extractErrorSchema(operation);
       if (errorSchema) {
-        routeDef.errorResponse = new JSONSchemaValidator(
-          errorSchema,
-          definitions,
-        );
+        routeDef.errorResponse = fromJSONSchema(errorSchema, definitions);
       }
 
       // Path + query parameters
       const params = extractParams(operation, 'path');
       if (params) {
-        routeDef.params = new JSONSchemaValidator(params, definitions);
+        routeDef.params = fromJSONSchema(params, definitions);
       }
 
       const query = extractParams(operation, 'query');
       if (query) {
-        routeDef.query = new JSONSchemaValidator(query, definitions);
+        routeDef.query = fromJSONSchema(query, definitions);
       }
 
       methodDefs[method.toUpperCase() as HttpMethod] = routeDef;
@@ -388,25 +382,14 @@ export function extractComponentSchemas(
   return { schemas };
 }
 
-/** Build a flat definitions map for $ref resolution */
+/**
+ * Flat map of component schemas by name. Refs in route schemas (of the form
+ * `#/components/schemas/Pet`) resolve by their last path segment.
+ */
 function buildDefinitions(
   spec: OpenAPISpec,
 ): Record<string, JSONSchemaDefinition> {
-  const defs: Record<string, Record<string, JSONSchemaDefinition>> = {};
-  if (spec.components?.schemas) {
-    defs.components = { schemas: spec.components.schemas as unknown as JSONSchemaDefinition } as unknown as Record<string, JSONSchemaDefinition>;
-    // Flatten for easier resolution: components/schemas/Foo
-    const flat: Record<string, JSONSchemaDefinition> = {};
-    for (const [name, schema] of Object.entries(spec.components.schemas)) {
-      flat.components ??= {} as unknown as JSONSchemaDefinition;
-      (flat as Record<string, Record<string, unknown>>).components!.schemas ??= {};
-      (
-        (flat as Record<string, Record<string, Record<string, unknown>>>).components!.schemas!
-      )[name] = schema;
-    }
-    return flat;
-  }
-  return {};
+  return (spec.components?.schemas ?? {}) as Record<string, JSONSchemaDefinition>;
 }
 
 function extractBodySchema(

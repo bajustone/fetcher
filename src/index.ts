@@ -1,5 +1,5 @@
 /**
- * @bajustone/fetcher — schema-validated, typed fetch client with OpenAPI support.
+ * `@bajustone/fetcher` — schema-validated, typed fetch client.
  *
  * Wraps the native `fetch` API and extends the returned `Response` with a
  * typed `.result()` method that validates the body against a schema and
@@ -7,78 +7,46 @@
  *
  * Works with any schema library that implements the
  * [Standard Schema V1](https://standardschema.dev) spec — Zod 3.24+,
- * Valibot, ArkType, the bundled `JSONSchemaValidator`, or any value with a
- * `~standard.validate` property — and ships with an OpenAPI 3.x adapter
- * that builds typed routes from a spec with zero runtime deps.
+ * Valibot, ArkType, the bundled schema builder, or any value with a
+ * `~standard.validate` property.
  *
- * @example Quick start with manual route schemas
+ * ## Subpaths
+ *
+ * - `@bajustone/fetcher` (this entry) — `createFetch`, middleware, types,
+ *   `inline()`, `fromJSONSchema()`.
+ * - `@bajustone/fetcher/schema` — native schema builder (`object`, `string`,
+ *   `integer`, `optional`, `ref`, `compile`, formats, etc.). Tree-shakeable
+ *   per factory.
+ * - `@bajustone/fetcher/openapi` — `fromOpenAPI`, `extractRouteSchemas`,
+ *   `extractComponentSchemas`, `bundleComponent`, `translateDialect`,
+ *   `JSONSchemaDefinition`.
+ * - `@bajustone/fetcher/spec-tools` — `coverage`, `lintSpec`.
+ * - `@bajustone/fetcher/vite` — Rollup/Vite plugin.
+ *
+ * @example Manual route schemas (any Standard Schema V1 validator)
  * ```typescript
  * import { createFetch } from '@bajustone/fetcher';
- * import { z } from 'zod';
+ * import { object, string } from '@bajustone/fetcher/schema';
  *
  * const f = createFetch({
  *   baseUrl: 'https://api.example.com',
  *   routes: {
  *     '/auth/login': {
  *       POST: {
- *         body: z.object({ email: z.string(), password: z.string() }),
- *         response: z.object({ token: z.string() }),
+ *         body: object({ email: string(), password: string() }),
+ *         response: object({ token: string() }),
  *       },
  *     },
  *   },
  * });
- *
- * const res = await f.post('/auth/login', {
- *   body: { email: 'a@b.com', password: 'secret' },
- * });
- * const result = await res.result();
- * if (result.ok) {
- *   result.data.token; // typed
- * } else {
- *   // result.error: FetcherError — { kind: 'network' | 'validation' | 'http', ... }
- * }
- * ```
- *
- * @example From an OpenAPI spec
- * ```typescript
- * import { createFetch, fromOpenAPI } from '@bajustone/fetcher';
- * import spec from './openapi.json';
- *
- * const f = createFetch({
- *   baseUrl: 'https://api.example.com',
- *   routes: fromOpenAPI(spec),
- * });
- *
- * f('/pets/{petId}', { method: 'GET', params: { petId: '42' } });
- * //  ^ autocompletes from spec               ^ inferred from path template
  * ```
  *
  * @module
  */
 
 export { createFetch, extractErrorMessage, FetcherRequestError } from './fetcher.ts';
-export { inline } from './inline.ts';
-export { JSONSchemaValidator, ValidationError } from './json-schema-validator.ts';
-export type { JSONSchemaDefinition } from './json-schema-validator.ts';
 export { authBearer, bearerWithRefresh, retry, timeout } from './middleware.ts';
 export type { BearerWithRefreshOptions } from './middleware.ts';
-
-export {
-  bundleComponent,
-  extractComponentSchemas,
-  extractRouteSchemas,
-  fromOpenAPI,
-  JSON_SCHEMA_DIALECT,
-  translateDialect,
-} from './openapi.ts';
-export type { ExtractedRouteSchemas } from './openapi.ts';
-
-export { coverage, lintSpec } from './spec-tools.ts';
-export type {
-  RouteCoverage,
-  SpecCoverageReport,
-  SpecDriftIssue,
-} from './spec-tools.ts';
 
 export type {
   AvailableMethods,

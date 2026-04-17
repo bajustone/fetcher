@@ -11,7 +11,7 @@
  * @module
  */
 
-import type { JSONSchemaDefinition } from './json-schema-validator.ts';
+import type { JSONSchemaDefinition } from './json-schema-types.ts';
 
 const DEFS_REF_PREFIX = '#/$defs/';
 

@@ -1,9 +1,12 @@
 {
   "name": "@bajustone/fetcher",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
+    "./schema": "./src/schema/index.ts",
+    "./openapi": "./src/openapi/index.ts",
+    "./spec-tools": "./src/spec-tools/index.ts",
     "./vite": "./src/vite-plugin.ts"
   },
   "publish": {

@@ -7,8 +7,9 @@
 ## Design Principles
 
 1. **100% native fetch** — The returned object is a real `Response`. All native methods (`.json()`, `.text()`, `.blob()`, `.headers`, `.status`) work as expected.
-2. **Standard Schema V1** — Any schema implementing the [Standard Schema V1](https://standardschema.dev) spec (Zod 3.24+, Valibot, ArkType, the bundled `JSONSchemaValidator`, or any value with a `~standard.validate` property) works out of the box.
-3. **Zero runtime deps** — Ships a built-in JSON Schema validator for `fromOpenAPI()`. No external dependencies.
+2. **Standard Schema V1** — Any schema implementing the [Standard Schema V1](https://standardschema.dev) spec (Zod 3.24+, Valibot, ArkType, the bundled schema builder under `./schema`, or any value with a `~standard.validate` property) works out of the box.
+3. **Zero runtime deps** — Ships a native schema builder and a raw-JSON-Schema bridge. No external dependencies.
+4. **Subpath-split for bundle discipline** — Core is ~2.7 KB gzipped. OpenAPI, dev-time spec tools, and the schema builder live in opt-in subpaths.
 4. **Never throws** — `.result()` catches errors and returns them in a discriminated union. Network failures, validation errors, and HTTP errors are all surfaced via `{ error }`.
 5. **Framework-compatible** — Accepts a custom `fetch` function per-call (e.g., SvelteKit's load `fetch`) or globally via config.
 
@@ -28,7 +29,7 @@ if (result.ok) {
 
 Two pieces compose to produce this result:
 
-1. **Runtime validators** — `fromOpenAPI(spec)` parses an OpenAPI 3.x spec, resolves `$ref` pointers, and creates `JSONSchemaValidator` instances for every route's body / params / query / response / errorResponse.
+1. **Runtime validators** — `fromOpenAPI(spec)` (from `@bajustone/fetcher/openapi`) parses an OpenAPI 3.x spec, resolves `$ref` pointers, and produces pre-compiled validators for every route's body / params / query / response / errorResponse. Under the hood it calls `fromJSONSchema` which dispatches each JSON Schema node to the native builder's factory primitives.
 2. **Type inference** — an `openapi-typescript`-generated `paths` interface, passed as the `OAS` generic on `createFetch<paths>(...)`, drives static type inference for body, response, and error bodies via helper types in `src/types.ts`.
 
 Types and runtime validation are **decoupled by design** — see "Hybrid type/runtime workflow" below.
@@ -61,7 +62,7 @@ This split is deliberate:
 
 #### Validator/type drift
 
-The runtime `JSONSchemaValidator` enforces a deliberately small subset (see the supported-keyword table in the "json-schema-validator.ts" section below). `openapi-typescript` may render features the runtime ignores. Where the two diverge, the type is stricter than the runtime. Examples:
+The runtime validator enforces a deliberately small subset (see the supported-keyword table below). `openapi-typescript` may render features the runtime ignores. Where the two diverge, the type is stricter than the runtime. Examples:
 
 - `format: 'email'` → types as `string`, runtime accepts any string.
 - `multipleOf` / `exclusiveMinimum` / `exclusiveMaximum` → ignored at runtime.
@@ -150,14 +151,26 @@ The clone is *not* taken on the synthetic response returned by client-side valid
 
 ```
 src/
-├── index.ts                  # Public exports (main entry)
-├── types.ts                  # All type definitions (TypedFetchPromise, <paths> helpers, SchemaOf, etc.)
+├── index.ts                  # Core: createFetch, middleware, types (subpath `.`)
+├── types.ts                  # Shared type definitions
 ├── fetcher.ts                # createFetch implementation
-├── openapi.ts                # fromOpenAPI implementation
-├── json-schema-validator.ts  # Built-in JSON Schema validator (Standard Schema V1)
-├── spec-tools.ts             # lintSpec + coverage
-├── vite-plugin.ts            # Rollup/Vite plugin (secondary export: @bajustone/fetcher/vite)
-└── middleware.ts             # Middleware types + built-ins
+├── middleware.ts             # Middleware types + built-ins
+├── from-json-schema.ts       # Raw JSON Schema → builder dispatcher (subpath `./openapi`)
+├── inline.ts                 # $ref dereferencer (subpath `./openapi`)
+├── json-schema-types.ts      # Shared JSONSchemaDefinition type
+├── openapi.ts                # fromOpenAPI implementation (subpath `./openapi`)
+├── spec-tools.ts             # lintSpec + coverage (subpath `./spec-tools`)
+├── vite-plugin.ts            # Rollup/Vite plugin (subpath `./vite`)
+├── openapi/index.ts          # Barrel for `./openapi`
+├── spec-tools/index.ts       # Barrel for `./spec-tools`
+└── schema/                   # Native schema builder (subpath `./schema`)
+    ├── types.ts              # FSchema, FOptionalWrapper, Infer, FObjectOutput, interfaces
+    ├── primitives.ts         # string, number, integer, boolean, null_, literal, unknown
+    ├── composites.ts         # object, array, optional, nullable, union, intersect, enum_
+    ├── discriminated.ts      # discriminatedUnion (O(1) tagged dispatch)
+    ├── refs.ts               # ref, compile (lazy $ref binding, cycle-safe)
+    ├── formats.ts            # email, url, uuid, datetime, date, time
+    └── index.ts              # Barrel
 ```
 
 ### types.ts
@@ -193,44 +206,40 @@ src/
 
 `.query()` is synchronous — it returns the key and function without triggering the fetch. The key is `[method, path, params?, query?]`, deterministic and compatible with TanStack Query's array keys.
 
-### json-schema-validator.ts
-- Lightweight JSON Schema validator implementing **Standard Schema V1** via the `~standard` property.
-- Used internally by `fromOpenAPI()` — no external dependency.
-- Also exports a deprecated `.parse()` method; new code should use `validator['~standard'].validate(data)`.
+### schema/ — native schema builder
 
-#### Supported subset
+Produces plain JSON Schema objects augmented with a pre-compiled `~standard.validate` closure at construction time. No runtime interpreter. Each factory is `/*@__NO_SIDE_EFFECTS__*/`-annotated so bundlers eliminate any factory whose result is never used.
 
-The validator covers a deliberately small slice of JSON Schema — enough for well-formed OpenAPI 3.x specs. The test suite at `tests/json-schema-validator.test.ts` is the authoritative reference.
+- **Primitives:** `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown`.
+- **Composites:** `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`.
+- **Discriminated union:** `discriminatedUnion(key, mapping)` — O(1) dispatch by tag.
+- **Refs:** `ref(name)` + `compile(schema, defs)` — lazy binding, cycle-safe.
+- **Formats:** `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern`.
 
-**Supported keywords:**
+Each schema satisfies `StandardSchemaV1<unknown, T>` structurally, so it drops directly into any `RouteDefinition` slot. Inference via `Infer<typeof Pet>`.
 
-| Category | Keywords |
+#### Supported keyword subset
+
+| Category | Keywords emitted + enforced |
 |---|---|
-| Type | `type` (`object`, `array`, `string`, `number`, `integer`, `boolean`, `null`), array form (`type: ['string', 'null']`), `nullable` |
+| Type | `type` (`object`, `array`, `string`, `number`, `integer`, `boolean`, `null`) |
 | Object | `properties`, `required` |
 | Array | `items`, `minItems`, `maxItems` |
-| String | `minLength`, `maxLength`, `pattern` |
+| String | `minLength`, `maxLength`, `pattern`, `format` (via helpers) |
 | Number / integer | `minimum`, `maximum` (integer also enforces integer-ness) |
-| Enum | `enum` (any JSON value) |
-| Composition | `oneOf` (exactly one), `anyOf` (at least one), `allOf` (all) |
-| Refs | `$ref` against the definitions object (typically `components.schemas`) |
+| Enum | `enum`, `const` |
+| Composition | `anyOf`, `allOf`, `oneOf` + `discriminator` |
+| Refs | `$ref` against a compiled `defs` map |
 
-**Not supported (intentionally):**
+**Not exposed (intentionally):** `multipleOf`, `exclusiveMinimum`/`exclusiveMaximum`, `patternProperties`, `propertyNames`, `additionalProperties` (sub-schema form), `if`/`then`/`else`, `dependentSchemas`, `dependentRequired`, `prefixItems`, `contains`, `uniqueItems`.
 
-- Conditional schemas (`if` / `then` / `else`, `dependentSchemas`, `dependentRequired`).
-- Format validators (`format: 'email'` etc. — recognized but not enforced).
-- Pattern properties (`patternProperties`, `propertyNames`, `additionalProperties` other than `false`).
-- Number constraints (`multipleOf`, `exclusiveMinimum`, `exclusiveMaximum`).
-- Recursive `$ref` (no cycle detection).
-- Tuple-typed arrays (`items: [...]`, `prefixItems`, `additionalItems`).
-- Schema annotations (`title`, `description`, `examples`, `default` — accepted, ignored).
-- `$id` / `$schema` / external `$ref`.
+### from-json-schema.ts
 
-**Maintenance contract:** the subset will not grow unless a new keyword is required for a real-world OpenAPI 3.x spec AND fits the existing recursive validator without architectural change.
+`fromJSONSchema<T>(schema, defs?)` — converts a raw JSON Schema object (plus optional `$defs` / component map) into a compiled builder schema. Dispatches each keyword to the native builder's factories. Used by `fromOpenAPI` and the Vite plugin's generated code as the bridge from spec-authored JSON to runtime validators.
 
 ### openapi.ts
 - `fromOpenAPI<const Spec>(spec)` — generic over the literal spec type. Converts an OpenAPI 3.x JSON spec into `Routes`, narrowed to the spec's actual paths and methods via `InferRoutesFromSpec`.
-- Resolves `$ref` pointers, extracts paths/methods/bodies/responses/parameters, creates `JSONSchemaValidator` instances.
+- Resolves `$ref` pointers, extracts paths/methods/bodies/responses/parameters, wraps each schema with `fromJSONSchema(schema, definitions)` to produce compiled validators.
 - Body / response / errorResponse *type* inference flows from the optional `<paths>` generic on `createFetch`, not from `fromOpenAPI` itself — `fromOpenAPI` owns only the runtime validators.
 
 ### spec-tools.ts

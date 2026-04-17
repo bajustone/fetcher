@@ -1,6 +1,6 @@
 # @bajustone/fetcher
 
-Schema-validated, typed fetch client with OpenAPI support. ~3.7 kB gzipped (tree-shaken).
+Schema-validated, typed fetch client with OpenAPI support. ~2.7 kB gzipped for the core, pay-as-used for the optional schema builder (string-only: ~330 B).
 
 Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.js, and edge runtimes.
 
@@ -18,8 +18,9 @@ Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.j
 - **100% native fetch** — the returned object is a real `Response`. All native methods (`.json()`, `.text()`, `.blob()`, `.headers`, `.status`) work alongside `.result()`.
 - **One-liner `.result()`** — `await f.get('/pets').result()` collapses two awaits into one. Returns a discriminated union `{ ok: true; data } | { ok: false; error }`. Never throws. Idempotent.
 - **Discriminated `FetcherError`** — `{ kind: 'network' | 'validation' | 'http', ... }`. Network failures, schema-validation issues, and HTTP error responses are all distinguishable without `instanceof` checks.
-- **Standard Schema V1** — works with Zod 3.24+, Valibot, ArkType, the bundled `JSONSchemaValidator`, or any value with a `~standard.validate` property.
-- **OpenAPI 3.x** — `fromOpenAPI(spec)` builds runtime validators from a spec. Pass an `openapi-typescript`-generated `paths` interface as a generic for full body/response/error type inference.
+- **Standard Schema V1** — works with Zod 3.24+, Valibot, ArkType, the native `@bajustone/fetcher/schema` builder, or any value with a `~standard.validate` property.
+- **Native schema builder** — `@bajustone/fetcher/schema` exports `string`, `object`, `optional`, `discriminatedUnion`, format helpers, and a `compile` pass for `$ref` resolution. Each factory is tree-shakeable (`@__NO_SIDE_EFFECTS__`) and validators are compiled at construction time — no runtime interpreter.
+- **OpenAPI 3.x** — `fromOpenAPI(spec)` (from `@bajustone/fetcher/openapi`) builds runtime validators from a spec. Pass an `openapi-typescript`-generated `paths` interface as a generic for full body/response/error type inference.
 - **Vite/Rollup plugin** — `fetcherPlugin()` auto-generates `paths.d.ts`, provides a `virtual:fetcher` module exporting pre-built route schemas, and watches the spec for changes during dev. Optionally fetches the spec from a remote URL. Import as `@bajustone/fetcher/vite`.
 - **Composable middleware** — Hono/Koa-shaped recursive dispatcher. Per-call `middleware: false` or `middleware: [...]` override.
 - **Built-in middlewares** — `authBearer`, `bearerWithRefresh` (with concurrent-401 dedup and typed `exclude` list), `timeout`, `retry` (exponential backoff with jitter, honors `Retry-After`).
@@ -213,7 +214,7 @@ import { z } from 'zod';
 import { schemas } from 'virtual:fetcher/inlined';
 const User = z.fromJSONSchema(schemas.User);
 
-// Zero-dep runtime validation via the bundled JSONSchemaValidator
+// Zero-dep runtime validation via the pre-compiled builder validators
 import { validators } from 'virtual:fetcher';
 const result = await validators.User['~standard'].validate(input);
 if (!result.issues) handleValid(result.value);
@@ -224,7 +225,7 @@ Recursive components (e.g., a tree with self-reference) can only be used via the
 For inlining a JSON Schema that didn't come from fetcher (e.g., an external schema you want to drop into a consumer that doesn't resolve `$ref`), the core package exports an `inline()` helper — memoized by input identity, throws on cycles:
 
 ```typescript
-import { inline } from '@bajustone/fetcher';
+import { inline } from '@bajustone/fetcher/openapi';
 const flat = inline(someExternalSchema);
 ```
 
@@ -556,15 +557,37 @@ export async function load({ fetch }) {
 | `createFetch(config)` | Factory returning a typed fetch function. Optional `<paths>` generic for OpenAPI type inference. |
 | `extractErrorMessage(error)` | Turns a `FetcherError` into a human-readable string. Handles all three error kinds. |
 | `FetcherRequestError` | Error class thrown by `.unwrap()`. Carries `.status`, `.fetcherError`, and `.message`. |
-| `fromOpenAPI(spec)` | Converts an OpenAPI 3.x spec into routes with runtime validators. |
-| `lintSpec(spec)` | Walks an OpenAPI 3.x spec; returns every keyword the runtime validator doesn't enforce. |
-| `coverage(spec)` | Walks an OpenAPI 3.x spec; reports per-route schema complexity (`oneOf`/`allOf`/recursive `$ref`/etc.). |
 | `authBearer(getToken)` | Bearer-token middleware. |
 | `bearerWithRefresh(opts)` | Bearer auth + 401-refresh-retry middleware with `exclude` list. |
 | `retry(opts)` | Retry middleware (number shorthand or `RetryOptions`). |
 | `timeout(ms)` | Per-request timeout middleware. |
-| `JSONSchemaValidator` | Bundled JSON Schema validator implementing Standard Schema V1. |
-| `ValidationError` | Thrown by the legacy `JSONSchemaValidator.parse()` (deprecated; prefer `~standard.validate`). |
+
+### Schema builder (`@bajustone/fetcher/schema`)
+
+| Export | Purpose |
+|---|---|
+| `string`, `number`, `integer`, `boolean`, `null_`, `literal`, `unknown` | Primitive factories. |
+| `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_` | Composites. |
+| `discriminatedUnion(key, map)` | O(1) tagged-union dispatch. |
+| `ref(name)` + `compile(schema, defs)` | Lazy, cycle-safe `$ref` binding. |
+| `email`, `url`, `uuid`, `datetime`, `date`, `time` | Format helpers — emit `format` + enforcing `pattern`. |
+| `Infer<typeof X>` | Extract the validated output type. |
+
+### OpenAPI / JSON Schema (`@bajustone/fetcher/openapi`)
+
+| Export | Purpose |
+|---|---|
+| `fromOpenAPI(spec)` | Converts an OpenAPI 3.x spec into routes with runtime validators. |
+| `fromJSONSchema(schema, defs?)` | Raw JSON Schema → compiled builder validator. |
+| `inline(schema)` | Dereferences local `$ref` into a self-contained JSON Schema (memoized, throws on cycles). |
+| `extractRouteSchemas`, `extractComponentSchemas`, `bundleComponent`, `translateDialect`, `JSON_SCHEMA_DIALECT` | Build-time helpers used by the Vite plugin. |
+
+### Spec tools (`@bajustone/fetcher/spec-tools`)
+
+| Export | Purpose |
+|---|---|
+| `lintSpec(spec)` | Walks an OpenAPI 3.x spec; returns every keyword the runtime validator doesn't enforce. |
+| `coverage(spec)` | Walks an OpenAPI 3.x spec; reports per-route schema complexity. |
 
 ### Plugin export (`@bajustone/fetcher/vite`)
 
