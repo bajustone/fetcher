@@ -90,6 +90,8 @@ export { default_, refined } from './refinements.ts';
 
 export { compile, ref } from './refs.ts';
 
+export { transform } from './transform.ts';
+
 export type {
   ArrayOptions,
   FAny,

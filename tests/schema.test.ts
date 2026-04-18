@@ -48,6 +48,7 @@ import {
   string,
   time,
   title,
+  transform,
   tuple,
   undefined_,
   union,
@@ -597,6 +598,62 @@ describe('default_', () => {
   it('exposes default in JSON Schema output', () => {
     const D = default_(string(), 'x');
     expect((D as unknown as { default: string }).default).toBe('x');
+  });
+});
+
+describe('transform', () => {
+  it('runs a single transform after successful validation', () => {
+    const Length = transform(string(), s => s.length);
+    expect(ok(run(Length, 'hello'))).toBe(5);
+  });
+
+  it('chains multiple transforms left-to-right', () => {
+    const YearFromISO = transform(
+      string({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
+      s => new Date(s),
+      d => d.getFullYear(),
+    );
+    expect(ok(run(YearFromISO, '2026-04-18'))).toBe(2026);
+  });
+
+  it('short-circuits on base schema failure — transforms do not run', () => {
+    let called = 0;
+    const S = transform(integer(), (n) => {
+      called++;
+      return n * 2;
+    });
+    expect(issues(run(S, 'nope'))[0]!.code).toBe('expected_integer');
+    expect(called).toBe(0);
+  });
+
+  it('composes with refined (validate → transform → refine)', () => {
+    const Slug = refined(
+      transform(string(), s => s.toLowerCase()),
+      s => /^[a-z0-9-]+$/.test(s),
+      'must be kebab-case',
+    );
+    expect(ok(run(Slug, 'Hello-World'))).toBe('hello-world');
+    expect(issues(run(Slug, 'Hello World'))[0]!.code).toBe('refine_failed');
+  });
+
+  it('composes with default_ (fallback → transform)', () => {
+    const Upper = transform(default_(string(), 'fallback'), s => s.toUpperCase());
+    expect(ok(run(Upper, undefined))).toBe('FALLBACK');
+    expect(ok(run(Upper, 'lower'))).toBe('LOWER');
+  });
+
+  it('reshapes objects (rename + derive fields)', () => {
+    const User = transform(
+      object({ user_id: integer(), display_name: string() }),
+      o => ({ id: o.user_id, name: o.display_name }),
+    );
+    expect(ok(run(User, { user_id: 1, display_name: 'Alice' }))).toEqual({ id: 1, name: 'Alice' });
+    expect(issues(run(User, { user_id: 1 }))[0]!.code).toBe('missing');
+  });
+
+  it('preserves JSON Schema shape of the base schema', () => {
+    const S = transform(string(), s => s.length);
+    expect((S as unknown as { type: string }).type).toBe('string');
   });
 });
 

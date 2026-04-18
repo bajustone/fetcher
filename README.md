@@ -398,7 +398,7 @@ Every factory is annotated `/*@__NO_SIDE_EFFECTS__*/`, so a bundler eliminates a
 | Number convenience | `positive`, `nonnegative`, `negative`, `nonpositive`, `finite`, `safe` |
 | Composites | `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`, `record`, `tuple` |
 | Object composition | `partial`, `required`, `pick`, `omit`, `extend`, `merge`, `keyof_` |
-| Predicates & defaults | `refined(schema, predicate, msg?)`, `default_(schema, fallback)` |
+| Predicates, defaults & transforms | `refined(schema, predicate, msg?)`, `default_(schema, fallback)`, `transform(schema, ...fns)` |
 | Tagged | `discriminatedUnion(key, { tag: variant })` — O(1) dispatch by property lookup |
 | Refs | `ref(name)` + `compile(schema, defs)` — lazy, cycle-safe binding |
 | Formats | `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern` |
@@ -471,10 +471,10 @@ const User = fromJSONSchema<{ id: number; name: string }>({
 
 `fromJSONSchema` dispatches each keyword to the matching builder factory, so the result tree-shakes identically.
 
-### Custom predicates and defaults
+### Custom predicates, defaults, and transforms
 
 ```typescript
-import { default_, integer, object, refined, string } from '@bajustone/fetcher/schema';
+import { default_, integer, object, refined, string, transform } from '@bajustone/fetcher/schema';
 
 const Password = refined(
   string({ minLength: 8 }),
@@ -486,9 +486,21 @@ const User = object({
   name: string(),
   theme: default_(string(), 'light'),  // missing → 'light'; present value validates normally
 });
+
+// Post-validation reshaping. Each step receives the previous step's output.
+const DateFromISO = transform(
+  string({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
+  (s) => new Date(s),
+  (d) => ({ date: d, year: d.getFullYear() }),
+);
+// Infer<typeof DateFromISO> = { date: Date; year: number }
 ```
 
-`refined` runs the base schema first, then your predicate; failure emits `code: 'refine_failed'`. `default_` fires only on `undefined` / missing object keys — any present value goes through the base schema unchanged. `default_` keeps the key required-typed so consumers always see the value.
+- `refined` runs the base schema first, then your predicate; failure emits `code: 'refine_failed'`.
+- `default_` fires only on `undefined` / missing object keys — any present value goes through the base schema unchanged. Keeps the key required-typed so consumers always see the value.
+- `transform` runs plain functions in sequence on the validated value. Base-schema failures short-circuit; transforms never see invalid input. Wrap with `refined` outside the `transform` if you need to reject after reshaping.
+
+`transform` validates wire data as-is, then reshapes. The emitted JSON Schema reflects the wire shape only — downstream tools (OpenAPI, inline) see the input structure without the transforms. For wire-fidelity use cases, skip `transform`.
 
 ### Error display
 
@@ -533,7 +545,8 @@ Both are standalone functions (not methods) and work with any Standard Schema V1
 
 The builder exposes only keywords the runtime can enforce. If you need any of these, reach for Zod / Valibot / ArkType — they all drop in via Standard Schema V1.
 
-- **No transforms** — `.transform()`, `.pipe()`, `.preprocess()`, `.coerce()`, `.catch()`. The builder validates wire data as-is.
+- **No pre-validation transforms** — `.preprocess()`, `.coerce()`. Input into the validator stays as-is; wire data is verified literally. Post-validation reshaping is fine (see `transform`).
+- **No error-swallowing fallbacks** — `.catch()`. If validation fails, fetcher surfaces the issues.
 - **No compositional sugar** beyond what ships (`partial`, `pick`, `omit`, `extend`, `merge`, `keyof_`).
 - **No conditional schemas** — `if` / `then` / `else`, `dependentSchemas`, `dependentRequired`.
 - **No array tuples beyond `tuple`** — no `contains`, `uniqueItems`.
@@ -798,7 +811,7 @@ export async function load({ fetch }) {
 | `positive`, `nonnegative`, `negative`, `nonpositive`, `finite`, `safe` | Number convenience wrappers. |
 | `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`, `record`, `tuple` | Composites. |
 | `partial`, `required`, `pick`, `omit`, `extend`, `merge`, `keyof_` | Object composition helpers. |
-| `refined(schema, predicate, msg?)`, `default_(schema, fallback)` | Custom predicates and undefined-only defaults. |
+| `refined(schema, predicate, msg?)`, `default_(schema, fallback)`, `transform(schema, ...fns)` | Custom predicates, undefined-only defaults, post-validation reshaping. |
 | `discriminatedUnion(key, map)` | O(1) tagged-union dispatch. |
 | `ref(name)` + `compile(schema, defs)` | Lazy, cycle-safe `$ref` binding. |
 | `email`, `url`, `uuid`, `datetime`, `date`, `time` | Format helpers — emit `format` + enforcing `pattern`. |

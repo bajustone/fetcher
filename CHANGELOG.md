@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.6.0] - 2026-04-18
+
+Adds post-validation transforms. Non-breaking.
+
+### Added
+
+- `transform(schema, ...fns)` — runs plain transform functions in
+  sequence on the validated value. Base schema runs first; on success,
+  each subsequent function receives the previous step's output. On
+  validation failure, transforms are skipped and issues propagate.
+
+  Type-safe variadic with 6 overloads covering 1–6 transform functions
+  per call. For more, nest transforms.
+
+  ```ts
+  const YearFromISO = transform(
+    string({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
+    (s) => new Date(s),
+    (d) => d.getFullYear(),
+  );
+  // Infer<typeof YearFromISO> = number
+  ```
+
+  Wire data is validated literally before any transform runs — the
+  "validate wire as-is" principle holds. Transforms only reshape the
+  successfully-validated output.
+
+  Composes with `refined` (for post-transform validation) and
+  `default_` (for undefined-only fallback) via nesting. No curry, no
+  action infrastructure — just plain functions.
+
+### Changed
+
+- "Intentionally out of scope" docs updated: pre-validation transforms
+  (`.preprocess`, `.coerce`) and error-swallowing (`.catch`) remain out.
+  `.transform` / `.pipe` are now in via this single `transform` function.
+
+### Bundle impact
+
+- Core and other subpaths unchanged.
+- `./schema` wholesale: ~3.4 → ~3.5 KB gz (~60 B gz).
+
 ## [0.5.0] - 2026-04-18
 
 Non-breaking ergonomics release. Adds the top-level `parse()` function

@@ -216,7 +216,7 @@ Produces plain JSON Schema objects augmented with a pre-compiled `~standard.vali
 - **Number convenience:** `positive`, `nonnegative`, `negative`, `nonpositive`, `finite`, `safe`.
 - **Composites:** `object`, `array`, `optional`, `nullable`, `union`, `intersect`, `enum_`, `record`, `tuple`.
 - **Object composition:** `partial`, `required`, `pick`, `omit`, `extend`, `merge`, `keyof_` — rebuild object shapes without re-typing properties.
-- **Predicates & defaults:** `refined(schema, predicate, msg?)` runs a custom check after base validation; `default_(schema, fallback)` substitutes a fallback for `undefined` / missing object keys. Neither transforms input — they preserve "validate wire data as-is."
+- **Predicates, defaults & transforms:** `refined(schema, predicate, msg?)` runs a custom check after base validation; `default_(schema, fallback)` substitutes a fallback for `undefined` / missing object keys; `transform(schema, ...fns)` runs plain transform functions on the validated value (short-circuits on validation failure). Wire data is still verified literally — only post-validation output is reshaped.
 - **Discriminated union:** `discriminatedUnion(key, mapping)` — O(1) dispatch by tag.
 - **Refs:** `ref(name)` + `compile(schema, defs)` — lazy binding, cycle-safe.
 - **Formats:** `email`, `url`, `uuid`, `datetime`, `date`, `time` — each emits both `format` and an enforcing `pattern`.
