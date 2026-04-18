@@ -48,33 +48,70 @@ export interface SpecDriftIssue {
   message: string;
 }
 
+/**
+ * Spec-integrity issue detected by {@link coverage} — a discriminator
+ * mismatch, a `required` key with no matching property, or a response
+ * with content in a media type fetcher won't consume.
+ */
+export interface IntegrityIssue {
+  /**
+   * Category of the issue. `discriminator_mismatch` — a `oneOf` variant
+   * lacks the discriminator key or has a non-`const`/single-`enum` value;
+   * `discriminator_duplicate` — two variants share the same tag;
+   * `required_without_property` — an `object` schema lists a key in
+   * `required` that isn't in `properties`; `unreachable_response` — a
+   * response declares `content` but no `application/json` or wildcard
+   * (`*` `/` `*`) media type (fetcher's default extractors only match those two).
+   */
+  kind:
+    | 'discriminator_mismatch'
+    | 'discriminator_duplicate'
+    | 'required_without_property'
+    | 'unreachable_response';
+  /** RFC 6901 JSON Pointer to the node, rooted at the spec. */
+  pointer: string;
+  /** Human-readable explanation. */
+  message: string;
+}
+
 /** Per-route Tier 0 type-level inference readiness. See {@link coverage}. */
 export interface RouteCoverage {
   path: string;
   method: string;
   /**
-   * True when Tier 0 type-level inference can produce a typed body, OR
-   * when the route declares no request body (vacuous true). False only when
-   * a body schema is declared and Tier 0 cannot type it.
+   * True when `JSONSchemaToType` can produce a typed body, OR when the
+   * route declares no request body (vacuous true). False only when a body
+   * schema is declared and the converter can't type it.
    */
   bodyTyped: boolean;
   /**
-   * True when Tier 0 type-level inference can produce a typed success
-   * response, OR when no 2xx JSON response is declared. False only when at
-   * least one 2xx JSON response is declared and Tier 0 cannot type any of them.
+   * True when `JSONSchemaToType` can produce a typed success response, OR
+   * when no 2xx JSON response is declared.
    */
   responseTyped: boolean;
   /**
-   * True when Tier 0 type-level inference can produce a typed error response,
-   * OR when no 4xx/5xx/`default` JSON response is declared. False only when at
-   * least one error JSON response is declared and Tier 0 cannot type any of them.
+   * True when `JSONSchemaToType` can produce a typed error response, OR
+   * when no 4xx/5xx/`default` JSON response is declared.
    */
   errorTyped: boolean;
   /**
    * Reasons each slot fell back to `unknown` (empty when fully typed).
-   * Examples: `'oneOf in response schema'`, `'recursive $ref detected at #/components/schemas/Tree'`.
+   * Examples: `'patternProperties in response schema'`,
+   * `'recursive $ref detected at #/components/schemas/Tree in body schema'`.
    */
   fallbackReasons: string[];
+  /**
+   * Runtime-unsupported keywords this route uses transitively (via `$ref`).
+   * Deduped across body / response / error slots. Keywords here are
+   * accepted-but-unenforced at runtime — the spec declares a constraint
+   * the validator silently ignores.
+   */
+  unsupportedKeywords: string[];
+  /**
+   * Spec-integrity issues detected for this route. Empty when the route
+   * is internally consistent.
+   */
+  integrityIssues: IntegrityIssue[];
 }
 
 /** Aggregate report from {@link coverage}. */
@@ -83,12 +120,14 @@ export interface SpecCoverageReport {
   summary: {
     /** Total routes (path × declared method). */
     total: number;
-    /** Routes where every applicable slot is typed by Tier 0. */
+    /** Routes where every applicable slot is typed by `JSONSchemaToType`. */
     fullyTyped: number;
     /** Routes where at least one slot is typed but at least one falls back. */
     partial: number;
     /** Routes where no slot is typed. */
     untyped: number;
+    /** Routes with at least one entry in `integrityIssues`. */
+    withIntegrityIssues: number;
   };
 }
 
@@ -105,6 +144,20 @@ export interface SpecCoverageReport {
  * with a sub-schema value; `items` with an array value) are handled inline
  * in {@link walkSchema}.
  */
+/**
+ * Formats that have a matching builder helper in `@bajustone/fetcher/schema`.
+ * Used to enrich the `lintSpec` drift message with a concrete fix.
+ */
+const BUILDER_FORMAT_HELPERS: Readonly<Record<string, string>> = {
+  'email': 'email()',
+  'uri': 'url()',
+  'url': 'url()',
+  'uuid': 'uuid()',
+  'date-time': 'datetime()',
+  'date': 'date()',
+  'time': 'time()',
+};
+
 const UNSUPPORTED_KEYWORDS: Record<string, { severity: 'warn' | 'info'; message: string }> = {
   format: {
     severity: 'warn',
@@ -186,14 +239,45 @@ const UNSUPPORTED_KEYWORDS: Record<string, { severity: 'warn' | 'info'; message:
  * (b) it would become directly load-bearing if TypeScript ever ships
  * literal-preserving JSON imports ([microsoft/TypeScript#32063](https://github.com/microsoft/TypeScript/issues/32063)).
  */
+/**
+ * Keywords that defeat the v0.4.0 `JSONSchemaToType` type-level converter
+ * (src/infer-spec.ts). When any of these appears in a route's body /
+ * response / errorResponse schema (transitively, after `$ref` resolution),
+ * {@link coverage} marks the slot as a typing fallback.
+ *
+ * `anyOf` / `oneOf` / `allOf` are NOT blockers — `JSONSchemaToType` handles
+ * them via union / intersection. They used to be listed here; removed in
+ * v0.7.0 as part of aligning coverage with real inference capabilities.
+ */
 const TIER_0_BLOCKER_KEYWORDS: ReadonlyArray<string> = [
-  'oneOf',
-  'anyOf',
-  'allOf',
-  // patternProperties / propertyNames / prefixItems also block, but they're
-  // already flagged by lintSpec — listed here so coverage reports them too.
   'patternProperties',
+  'propertyNames',
   'prefixItems',
+  'if',
+  'then',
+  'else',
+  'dependentSchemas',
+  'dependentRequired',
+];
+
+/**
+ * Keywords the runtime does not enforce. Aggregated at route level into
+ * `RouteCoverage.unsupportedKeywords` so CI output is grouped by route.
+ */
+const RUNTIME_UNSUPPORTED_KEYWORDS: ReadonlyArray<string> = [
+  'format',
+  'multipleOf',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'patternProperties',
+  'propertyNames',
+  'if',
+  'then',
+  'else',
+  'dependentSchemas',
+  'dependentRequired',
+  'prefixItems',
+  'additionalItems',
 ];
 
 const HTTP_METHODS = new Set([
@@ -314,7 +398,10 @@ export function lintSpec(spec: unknown): SpecDriftIssue[] {
  */
 export function coverage(spec: unknown): SpecCoverageReport {
   if (!spec || typeof spec !== 'object') {
-    return { routes: [], summary: { total: 0, fullyTyped: 0, partial: 0, untyped: 0 } };
+    return {
+      routes: [],
+      summary: { total: 0, fullyTyped: 0, partial: 0, untyped: 0, withIntegrityIssues: 0 },
+    };
   }
 
   const routes: RouteCoverage[] = [];
@@ -324,6 +411,7 @@ export function coverage(spec: unknown): SpecCoverageReport {
     for (const [path, pathItem] of Object.entries(paths)) {
       if (!pathItem || typeof pathItem !== 'object')
         continue;
+      const escapedPath = escapePointer(path);
 
       for (const [method, operation] of Object.entries(pathItem as Record<string, unknown>)) {
         if (!HTTP_METHODS.has(method))
@@ -331,6 +419,7 @@ export function coverage(spec: unknown): SpecCoverageReport {
         if (!operation || typeof operation !== 'object')
           continue;
         const op = operation as Record<string, unknown>;
+        const opPointer = `#/paths/${escapedPath}/${method}`;
 
         const bodySlot = walkBodySlot(spec, op.requestBody);
         const responseSlot = walkResponseSlot(spec, op.responses, 'response', isSuccessStatus);
@@ -342,6 +431,14 @@ export function coverage(spec: unknown): SpecCoverageReport {
           ...errorSlot.reasons,
         ];
 
+        const unsupportedSet = new Set<string>();
+        collectUnsupported(spec, op.requestBody, unsupportedSet);
+        collectUnsupportedFromResponses(spec, op.responses, unsupportedSet);
+
+        const integrityIssues: IntegrityIssue[] = [];
+        checkIntegrityFromBody(spec, op.requestBody, `${opPointer}/requestBody`, integrityIssues);
+        checkIntegrityFromResponses(spec, op.responses, `${opPointer}/responses`, integrityIssues);
+
         routes.push({
           path,
           method: method.toUpperCase(),
@@ -349,6 +446,8 @@ export function coverage(spec: unknown): SpecCoverageReport {
           responseTyped: responseSlot.typed,
           errorTyped: errorSlot.typed,
           fallbackReasons,
+          unsupportedKeywords: Array.from(unsupportedSet).sort(),
+          integrityIssues,
         });
       }
     }
@@ -357,6 +456,7 @@ export function coverage(spec: unknown): SpecCoverageReport {
   let fullyTyped = 0;
   let partial = 0;
   let untyped = 0;
+  let withIntegrityIssues = 0;
   for (const r of routes) {
     const slotsTyped = (r.bodyTyped ? 1 : 0) + (r.responseTyped ? 1 : 0) + (r.errorTyped ? 1 : 0);
     if (slotsTyped === 3)
@@ -365,11 +465,19 @@ export function coverage(spec: unknown): SpecCoverageReport {
       untyped++;
     else
       partial++;
+    if (r.integrityIssues.length > 0)
+      withIntegrityIssues++;
   }
 
   return {
     routes,
-    summary: { total: routes.length, fullyTyped, partial, untyped },
+    summary: {
+      total: routes.length,
+      fullyTyped,
+      partial,
+      untyped,
+      withIntegrityIssues,
+    },
   };
 }
 
@@ -460,11 +568,21 @@ function walkForLint(node: unknown, pointer: string, driftIssues: SpecDriftIssue
   for (const [keyword, value] of Object.entries(obj)) {
     const meta = UNSUPPORTED_KEYWORDS[keyword];
     if (meta) {
+      let message = meta.message;
+      if (keyword === 'format' && typeof value === 'string') {
+        const helper = BUILDER_FORMAT_HELPERS[value];
+        if (helper !== undefined) {
+          message = `format '${value}' is not enforced by the raw-JSON runtime. Use the ${helper} builder helper from @bajustone/fetcher/schema for runtime enforcement (it pairs format with an enforcing pattern).`;
+        }
+        else {
+          message = `format '${value}' is not enforced at runtime — runtime accepts any string. No matching builder helper; add a pattern constraint if enforcement matters.`;
+        }
+      }
       driftIssues.push({
         pointer: `${pointer}/${escapePointer(keyword)}`,
         keyword,
         severity: meta.severity,
-        message: meta.message,
+        message,
       });
       continue;
     }
@@ -690,4 +808,313 @@ function isErrorStatus(status: string): boolean {
     return true;
   const code = Number.parseInt(status, 10);
   return Number.isFinite(code) && code >= 400 && code < 600;
+}
+
+// ---------------------------------------------------------------------------
+// Unsupported-keyword collector (item 2 — route-level aggregate)
+// ---------------------------------------------------------------------------
+
+function collectUnsupported(
+  spec: unknown,
+  requestBody: unknown,
+  out: Set<string>,
+): void {
+  if (!requestBody || typeof requestBody !== 'object')
+    return;
+  const content = (requestBody as { content?: unknown }).content;
+  if (!content || typeof content !== 'object')
+    return;
+  const json = (content as Record<string, unknown>)['application/json'];
+  const schema = (json as { schema?: unknown } | undefined)?.schema;
+  if (!schema)
+    return;
+  walkForUnsupported(spec, schema, out, new Set());
+}
+
+function collectUnsupportedFromResponses(
+  spec: unknown,
+  responses: unknown,
+  out: Set<string>,
+): void {
+  if (!responses || typeof responses !== 'object')
+    return;
+  for (const response of Object.values(responses as Record<string, unknown>)) {
+    const content = (response as { content?: unknown } | undefined)?.content;
+    if (!content || typeof content !== 'object')
+      continue;
+    const json = (content as Record<string, unknown>)['application/json'];
+    const schema = (json as { schema?: unknown } | undefined)?.schema;
+    if (!schema)
+      continue;
+    walkForUnsupported(spec, schema, out, new Set());
+  }
+}
+
+function walkForUnsupported(
+  spec: unknown,
+  node: unknown,
+  out: Set<string>,
+  visitedRefs: Set<string>,
+): void {
+  if (!node || typeof node !== 'object')
+    return;
+  const obj = node as Record<string, unknown>;
+
+  if (typeof obj.$ref === 'string') {
+    if (visitedRefs.has(obj.$ref) || !obj.$ref.startsWith('#/'))
+      return;
+    const target = resolveRef(spec, obj.$ref);
+    if (target === undefined)
+      return;
+    visitedRefs.add(obj.$ref);
+    walkForUnsupported(spec, target, out, visitedRefs);
+    visitedRefs.delete(obj.$ref);
+    return;
+  }
+
+  for (const kw of RUNTIME_UNSUPPORTED_KEYWORDS) {
+    if (obj[kw] !== undefined)
+      out.add(kw);
+  }
+  if (
+    obj.additionalProperties
+    && typeof obj.additionalProperties === 'object'
+    && !Array.isArray(obj.additionalProperties)
+  ) {
+    out.add('additionalProperties');
+  }
+  if (Array.isArray(obj.items))
+    out.add('items');
+
+  if (obj.properties && typeof obj.properties === 'object') {
+    for (const sub of Object.values(obj.properties as Record<string, unknown>))
+      walkForUnsupported(spec, sub, out, visitedRefs);
+  }
+  if (obj.items && !Array.isArray(obj.items) && typeof obj.items === 'object')
+    walkForUnsupported(spec, obj.items, out, visitedRefs);
+  for (const combinator of ['oneOf', 'anyOf', 'allOf'] as const) {
+    const subs = obj[combinator];
+    if (Array.isArray(subs)) {
+      for (const s of subs)
+        walkForUnsupported(spec, s, out, visitedRefs);
+    }
+  }
+  if (
+    obj.additionalProperties
+    && typeof obj.additionalProperties === 'object'
+    && !Array.isArray(obj.additionalProperties)
+  ) {
+    walkForUnsupported(spec, obj.additionalProperties, out, visitedRefs);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Integrity checks (items 4, 5, 6)
+// ---------------------------------------------------------------------------
+
+function checkIntegrityFromBody(
+  spec: unknown,
+  requestBody: unknown,
+  pointer: string,
+  out: IntegrityIssue[],
+): void {
+  if (!requestBody || typeof requestBody !== 'object')
+    return;
+  const body = requestBody as Record<string, unknown>;
+  checkUnreachableContent(body.content, pointer, out);
+  if (body.content && typeof body.content === 'object') {
+    const json = (body.content as Record<string, unknown>)['application/json'];
+    const schema = (json as { schema?: unknown } | undefined)?.schema;
+    if (schema) {
+      walkForIntegrity(
+        spec,
+        schema,
+        `${pointer}/content/application~1json/schema`,
+        out,
+        new Set(),
+      );
+    }
+  }
+}
+
+function checkIntegrityFromResponses(
+  spec: unknown,
+  responses: unknown,
+  pointer: string,
+  out: IntegrityIssue[],
+): void {
+  if (!responses || typeof responses !== 'object')
+    return;
+  for (const [status, response] of Object.entries(responses as Record<string, unknown>)) {
+    const respPointer = `${pointer}/${escapePointer(status)}`;
+    const respObj = response as Record<string, unknown> | undefined;
+    checkUnreachableContent(respObj?.content, respPointer, out);
+    if (respObj?.content && typeof respObj.content === 'object') {
+      const json = (respObj.content as Record<string, unknown>)['application/json'];
+      const schema = (json as { schema?: unknown } | undefined)?.schema;
+      if (schema) {
+        walkForIntegrity(
+          spec,
+          schema,
+          `${respPointer}/content/application~1json/schema`,
+          out,
+          new Set(),
+        );
+      }
+    }
+  }
+}
+
+function checkUnreachableContent(
+  content: unknown,
+  pointer: string,
+  out: IntegrityIssue[],
+): void {
+  if (!content || typeof content !== 'object')
+    return;
+  const c = content as Record<string, unknown>;
+  const mediaTypes = Object.keys(c);
+  if (mediaTypes.length === 0)
+    return;
+  const consumable = mediaTypes.some(m => m === 'application/json' || m === '*/*');
+  if (!consumable) {
+    out.push({
+      kind: 'unreachable_response',
+      pointer: `${pointer}/content`,
+      message: `Response declares content in [${mediaTypes.join(', ')}] but no application/json or */* media type — fetcher extracts only JSON by default, so this schema is unreachable.`,
+    });
+  }
+}
+
+function walkForIntegrity(
+  spec: unknown,
+  node: unknown,
+  pointer: string,
+  out: IntegrityIssue[],
+  visitedRefs: Set<string>,
+): void {
+  if (!node || typeof node !== 'object')
+    return;
+  const obj = node as Record<string, unknown>;
+
+  if (typeof obj.$ref === 'string') {
+    if (visitedRefs.has(obj.$ref) || !obj.$ref.startsWith('#/'))
+      return;
+    const target = resolveRef(spec, obj.$ref);
+    if (target === undefined)
+      return;
+    visitedRefs.add(obj.$ref);
+    walkForIntegrity(spec, target, obj.$ref, out, visitedRefs);
+    visitedRefs.delete(obj.$ref);
+    return;
+  }
+
+  if (Array.isArray(obj.oneOf) && obj.discriminator && typeof obj.discriminator === 'object') {
+    checkDiscriminator(
+      spec,
+      obj.oneOf,
+      obj.discriminator as Record<string, unknown>,
+      pointer,
+      out,
+    );
+  }
+
+  if (obj.type === 'object' && Array.isArray(obj.required) && obj.properties && typeof obj.properties === 'object') {
+    const props = obj.properties as Record<string, unknown>;
+    for (const required of obj.required as unknown[]) {
+      if (typeof required === 'string' && !(required in props)) {
+        out.push({
+          kind: 'required_without_property',
+          pointer: `${pointer}/required`,
+          message: `Schema declares '${required}' in required but '${required}' is not in properties — every request will emit a 'missing' error for this key.`,
+        });
+      }
+    }
+  }
+
+  if (obj.properties && typeof obj.properties === 'object') {
+    for (const [k, sub] of Object.entries(obj.properties as Record<string, unknown>))
+      walkForIntegrity(spec, sub, `${pointer}/properties/${escapePointer(k)}`, out, visitedRefs);
+  }
+  if (obj.items && !Array.isArray(obj.items) && typeof obj.items === 'object')
+    walkForIntegrity(spec, obj.items, `${pointer}/items`, out, visitedRefs);
+  for (const combinator of ['oneOf', 'anyOf', 'allOf'] as const) {
+    const subs = obj[combinator];
+    if (Array.isArray(subs)) {
+      subs.forEach((s, i) =>
+        walkForIntegrity(spec, s, `${pointer}/${combinator}/${i}`, out, visitedRefs),
+      );
+    }
+  }
+}
+
+function checkDiscriminator(
+  spec: unknown,
+  variants: unknown[],
+  discriminator: Record<string, unknown>,
+  pointer: string,
+  out: IntegrityIssue[],
+): void {
+  const propName = discriminator.propertyName;
+  if (typeof propName !== 'string')
+    return;
+  const seenTags = new Map<string, number>();
+  variants.forEach((variant, i) => {
+    const resolved = resolveVariantSchema(spec, variant);
+    if (!resolved)
+      return;
+    const tagValue = readDiscriminatorTag(resolved, propName);
+    if (tagValue === undefined) {
+      out.push({
+        kind: 'discriminator_mismatch',
+        pointer: `${pointer}/oneOf/${i}`,
+        message: `oneOf variant lacks a discriminator value for '${propName}' — must have properties.${propName}.const or a single-valued enum.`,
+      });
+      return;
+    }
+    const prior = seenTags.get(tagValue);
+    if (prior !== undefined) {
+      out.push({
+        kind: 'discriminator_duplicate',
+        pointer: `${pointer}/oneOf/${i}`,
+        message: `oneOf variant has discriminator '${propName}' value '${tagValue}' but variant ${prior} already uses that value.`,
+      });
+    }
+    else {
+      seenTags.set(tagValue, i);
+    }
+  });
+}
+
+function resolveVariantSchema(
+  spec: unknown,
+  variant: unknown,
+): Record<string, unknown> | undefined {
+  if (!variant || typeof variant !== 'object')
+    return undefined;
+  const v = variant as Record<string, unknown>;
+  if (typeof v.$ref === 'string' && v.$ref.startsWith('#/')) {
+    const target = resolveRef(spec, v.$ref);
+    if (!target || typeof target !== 'object')
+      return undefined;
+    return target as Record<string, unknown>;
+  }
+  return v;
+}
+
+function readDiscriminatorTag(
+  variant: Record<string, unknown>,
+  propName: string,
+): string | undefined {
+  const props = variant.properties as Record<string, unknown> | undefined;
+  if (!props)
+    return undefined;
+  const prop = props[propName] as Record<string, unknown> | undefined;
+  if (!prop)
+    return undefined;
+  if (typeof prop.const === 'string')
+    return prop.const;
+  if (Array.isArray(prop.enum) && prop.enum.length === 1 && typeof prop.enum[0] === 'string')
+    return prop.enum[0];
+  return undefined;
 }

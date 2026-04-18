@@ -209,13 +209,13 @@ describe('coverage', () => {
   it('returns an empty report for an empty/non-object spec', () => {
     const empty = coverage({});
     expect(empty.routes).toEqual([]);
-    expect(empty.summary).toEqual({ total: 0, fullyTyped: 0, partial: 0, untyped: 0 });
+    expect(empty.summary).toEqual({ total: 0, fullyTyped: 0, partial: 0, untyped: 0, withIntegrityIssues: 0 });
 
     const nonObj = coverage(null);
     expect(nonObj.routes).toEqual([]);
   });
 
-  it('flags `oneOf` in a response schema as a fallback reason', () => {
+  it('does NOT flag `oneOf` / `anyOf` / `allOf` — v0.4.0 JSONSchemaToType handles them', () => {
     const spec = {
       openapi: '3.0.3',
       paths: {
@@ -236,28 +236,6 @@ describe('coverage', () => {
               },
             },
           },
-        },
-      },
-    };
-
-    const report = coverage(spec);
-    expect(report.summary.total).toBe(1);
-    const route = report.routes[0]!;
-    expect(route.responseTyped).toBe(false);
-    expect(route.fallbackReasons).toContain('oneOf in response schema');
-    // body and error are vacuous true (none declared).
-    expect(route.bodyTyped).toBe(true);
-    expect(route.errorTyped).toBe(true);
-    // Mixed = partial.
-    expect(report.summary.partial).toBe(1);
-    expect(report.summary.fullyTyped).toBe(0);
-  });
-
-  it('flags `allOf` in a body schema as a fallback reason', () => {
-    const spec = {
-      openapi: '3.0.3',
-      paths: {
-        '/items': {
           post: {
             requestBody: {
               content: {
@@ -277,9 +255,70 @@ describe('coverage', () => {
     };
 
     const report = coverage(spec);
+    for (const route of report.routes) {
+      expect(route.fallbackReasons).toEqual([]);
+      expect(route.bodyTyped).toBe(true);
+      expect(route.responseTyped).toBe(true);
+    }
+    expect(report.summary.fullyTyped).toBe(2);
+  });
+
+  it('flags `patternProperties` as a fallback reason', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/items': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    patternProperties: {
+                      '^S_': { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
     const route = report.routes[0]!;
     expect(route.bodyTyped).toBe(false);
-    expect(route.fallbackReasons).toContain('allOf in body schema');
+    expect(route.fallbackReasons).toContain('patternProperties in body schema');
+  });
+
+  it('flags conditional schemas (if/then/else) as fallback reasons', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/cond': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    if: { properties: { kind: { const: 'a' } } },
+                    then: { required: ['a'] },
+                    else: { required: ['b'] },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    expect(route.bodyTyped).toBe(false);
+    expect(route.fallbackReasons.some(r => r.startsWith('if in'))).toBe(true);
   });
 
   it('detects recursive $ref through components.schemas', () => {
@@ -342,10 +381,10 @@ describe('coverage', () => {
                 content: {
                   'application/json': {
                     schema: {
-                      oneOf: [
-                        { type: 'object', properties: { code: { type: 'integer' } } },
-                        { type: 'string' },
-                      ],
+                      type: 'object',
+                      patternProperties: {
+                        '^err_': { type: 'string' },
+                      },
                     },
                   },
                 },
@@ -360,8 +399,267 @@ describe('coverage', () => {
     const route = report.routes[0]!;
     // 200 is clean → response slot is typed
     expect(route.responseTyped).toBe(true);
-    // default has oneOf → error slot falls back, NOT response.
+    // default has patternProperties → error slot falls back, NOT response.
     expect(route.errorTyped).toBe(false);
-    expect(route.fallbackReasons).toContain('oneOf in error schema');
+    expect(route.fallbackReasons).toContain('patternProperties in error schema');
+  });
+
+  it('unsupportedKeywords aggregates runtime-unenforced keywords per route', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/u': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      email: { type: 'string', format: 'email' },
+                      age: { type: 'integer', exclusiveMinimum: 0, multipleOf: 1 },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    expect(route.unsupportedKeywords.sort()).toEqual(['exclusiveMinimum', 'format', 'multipleOf']);
+  });
+
+  it('integrityIssues: discriminator_mismatch when variant lacks tag', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/shape': {
+          get: {
+            responses: {
+              200: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      discriminator: { propertyName: 'kind' },
+                      oneOf: [
+                        { type: 'object', properties: { kind: { const: 'circle' }, radius: { type: 'number' } } },
+                        { type: 'object', properties: { side: { type: 'number' } } }, // missing `kind`
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    const mismatch = route.integrityIssues.find(i => i.kind === 'discriminator_mismatch');
+    expect(mismatch).toBeDefined();
+    expect(mismatch!.message).toContain('kind');
+    expect(report.summary.withIntegrityIssues).toBe(1);
+  });
+
+  it('integrityIssues: discriminator_duplicate when two variants share a tag', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/shape': {
+          get: {
+            responses: {
+              200: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      discriminator: { propertyName: 'kind' },
+                      oneOf: [
+                        { type: 'object', properties: { kind: { const: 'x' }, a: { type: 'number' } } },
+                        { type: 'object', properties: { kind: { const: 'x' }, b: { type: 'number' } } },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    const dup = route.integrityIssues.find(i => i.kind === 'discriminator_duplicate');
+    expect(dup).toBeDefined();
+    expect(dup!.message).toContain('x');
+  });
+
+  it('integrityIssues: required_without_property surfaces spec typos', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/u': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    required: ['name', 'nameTypo'],
+                    properties: {
+                      name: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    const missing = route.integrityIssues.find(i => i.kind === 'required_without_property');
+    expect(missing).toBeDefined();
+    expect(missing!.message).toContain('nameTypo');
+  });
+
+  it('integrityIssues: unreachable_response when content lacks application/json', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/html-only': {
+          get: {
+            responses: {
+              200: {
+                content: {
+                  'text/html': {
+                    schema: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    const unreachable = route.integrityIssues.find(i => i.kind === 'unreachable_response');
+    expect(unreachable).toBeDefined();
+    expect(unreachable!.message).toContain('text/html');
+  });
+
+  it('integrityIssues: wildcard */* is consumable, not unreachable', () => {
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/wild': {
+          get: {
+            responses: {
+              200: {
+                content: {
+                  '*/*': { schema: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    expect(route.integrityIssues).toEqual([]);
+  });
+
+  it('resolves $ref before checking integrity', () => {
+    const spec = {
+      openapi: '3.0.3',
+      components: {
+        schemas: {
+          Shape: {
+            discriminator: { propertyName: 'kind' },
+            oneOf: [
+              { type: 'object', properties: { kind: { const: 'c' }, r: { type: 'number' } } },
+              { type: 'object', properties: { s: { type: 'number' } } }, // missing kind
+            ],
+          },
+        },
+      },
+      paths: {
+        '/s': {
+          get: {
+            responses: {
+              200: {
+                content: {
+                  'application/json': {
+                    schema: { $ref: '#/components/schemas/Shape' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    expect(route.integrityIssues.some(i => i.kind === 'discriminator_mismatch')).toBe(true);
+  });
+});
+
+describe('lintSpec format helper hint (item 1)', () => {
+  it('suggests email() builder helper for format: email', () => {
+    const spec = {
+      openapi: '3.0.3',
+      components: {
+        schemas: {
+          User: {
+            type: 'object',
+            properties: {
+              email: { type: 'string', format: 'email' },
+            },
+          },
+        },
+      },
+    };
+
+    const issues = lintSpec(spec);
+    const formatIssue = issues.find(i => i.keyword === 'format');
+    expect(formatIssue).toBeDefined();
+    expect(formatIssue!.message).toContain('email()');
+    expect(formatIssue!.message).toContain('@bajustone/fetcher/schema');
+  });
+
+  it('falls back to generic message for formats without a helper', () => {
+    const spec = {
+      openapi: '3.0.3',
+      components: {
+        schemas: {
+          User: {
+            type: 'object',
+            properties: {
+              ip: { type: 'string', format: 'ipv4' },
+            },
+          },
+        },
+      },
+    };
+
+    const issues = lintSpec(spec);
+    const formatIssue = issues.find(i => i.keyword === 'format');
+    expect(formatIssue).toBeDefined();
+    expect(formatIssue!.message).toContain('ipv4');
+    expect(formatIssue!.message).toContain('No matching builder helper');
   });
 });

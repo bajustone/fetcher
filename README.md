@@ -314,7 +314,34 @@ for (const route of report.routes) {
 }
 ```
 
-Each route in `report.routes` includes `bodyTyped`, `responseTyped`, `errorTyped` flags and a `fallbackReasons` array explaining why any slot couldn't be fully typed (e.g., unsupported `oneOf`/`allOf` combinations, recursive `$ref`).
+Each route in `report.routes` includes `bodyTyped` / `responseTyped` / `errorTyped` flags plus three issue arrays:
+
+- **`fallbackReasons`** — schema features that defeat `JSONSchemaToType` inference (`patternProperties`, `propertyNames`, `prefixItems`, `if`/`then`/`else`, conditional schemas, recursive `$ref`). Note: `oneOf`/`anyOf`/`allOf` are *not* flagged — they're handled natively by the v0.4.0 converter.
+- **`unsupportedKeywords`** — keywords this route uses (transitively via `$ref`) that the runtime silently ignores (`format`, `multipleOf`, `exclusiveMinimum`/`Maximum`, `patternProperties`, `propertyNames`, `if`/`then`/`else`, `dependentSchemas`, `dependentRequired`, `prefixItems`, `additionalItems`, sub-schema `additionalProperties`, tuple-shaped `items`). Route-level aggregate of what `lintSpec` flags at the keyword level.
+- **`integrityIssues`** — spec-level integrity problems worth catching in CI:
+  - `discriminator_mismatch` — a `oneOf` variant lacks the discriminator property or uses a non-`const`/single-`enum` value.
+  - `discriminator_duplicate` — two variants share the same discriminator tag.
+  - `required_without_property` — an `object` schema lists a key in `required` that isn't in `properties` (likely a typo; every request will fail with `missing`).
+  - `unreachable_response` — a response declares content in a media type fetcher's default extractor won't match (anything other than `application/json` or `*/*`).
+
+Example CI gate:
+
+```typescript
+import { coverage } from '@bajustone/fetcher/spec-tools';
+import spec from './openapi.json' with { type: 'json' };
+
+const report = coverage(spec);
+if (report.summary.withIntegrityIssues > 0) {
+  for (const route of report.routes) {
+    for (const issue of route.integrityIssues) {
+      console.error(`${issue.kind} at ${issue.pointer}: ${issue.message}`);
+    }
+  }
+  process.exit(1);
+}
+```
+
+`lintSpec()` and `coverage()` are complementary: use both as CI gates. `lintSpec` catches runtime-unenforced keywords site-by-site; `coverage` aggregates per route and adds spec-integrity checks.
 
 ### 2. Manual route schemas
 

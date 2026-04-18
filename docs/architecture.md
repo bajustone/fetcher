@@ -252,9 +252,9 @@ Each schema satisfies `StandardSchemaV1<unknown, T>` structurally, so it drops d
 - Body / response / errorResponse *type* inference flows from the optional `<paths>` generic on `createFetch`, not from `fromOpenAPI` itself — `fromOpenAPI` owns only the runtime validators.
 
 ### spec-tools.ts
-- `lintSpec(spec)` — walks an OpenAPI 3.x spec and returns one `SpecDriftIssue` per keyword the runtime validator doesn't enforce. Mirrors the "Not supported" table above.
-- `coverage(spec)` — walks the spec and returns a `SpecCoverageReport` indicating per-route which schema features (`oneOf`, `allOf`, recursive `$ref`, etc.) each route uses. Useful as a complexity audit.
-- Single recursive visitor shared between both functions; zero runtime dependencies.
+- `lintSpec(spec)` — walks an OpenAPI 3.x spec and returns one `SpecDriftIssue` per keyword the runtime validator doesn't enforce. For `format` drift, names the matching builder helper (`email()`, `url()`, etc.) when one exists.
+- `coverage(spec)` — walks the spec and returns a `SpecCoverageReport`. Per route: `fallbackReasons` (schema features `JSONSchemaToType` can't infer — post-v0.7.0 this excludes `oneOf`/`anyOf`/`allOf` since the v0.4.0 converter handles them); `unsupportedKeywords` (route-level aggregate of keywords the runtime doesn't enforce); `integrityIssues` (discriminator mismatches/duplicates, `required` keys without matching properties, response content in media types fetcher won't consume).
+- Zero runtime dependencies. Intended as CI gates.
 
 ### vite-plugin.ts
 - `fetcherPlugin(options)` — Rollup/Vite plugin, exported as `@bajustone/fetcher/vite`. Returns `any` to avoid requiring `vite` as a peer dependency.

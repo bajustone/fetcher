@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.7.0] - 2026-04-18
+
+Widened `spec-tools.coverage` — anything it can statically flag is a
+pre-ship win. Six new CI-grade checks. `lintSpec()` and `coverage()`
+APIs are backward-compatible; `RouteCoverage` gains two new fields
+(additive).
+
+### Added
+
+- **`lintSpec` format messages now name the builder helper** when one
+  exists. `format: 'email'` → "use the `email()` builder helper from
+  `@bajustone/fetcher/schema` for runtime enforcement". Formats without
+  a helper get a generic message that suggests adding a `pattern`
+  instead.
+
+- **`RouteCoverage.unsupportedKeywords: string[]`** — route-level
+  aggregate of keywords this route uses transitively (via `$ref`) that
+  the runtime doesn't enforce. Pairs with `lintSpec`: same set, per
+  route instead of per site. Useful for "which routes will silently
+  accept invalid data despite the spec's constraints?"
+
+- **`RouteCoverage.integrityIssues: IntegrityIssue[]`** — spec-integrity
+  problems:
+  - `discriminator_mismatch` — `oneOf` variant lacks discriminator tag
+    or uses non-`const`/single-`enum` value.
+  - `discriminator_duplicate` — two variants share the same tag.
+  - `required_without_property` — `required` lists a key missing from
+    `properties` (typo; every request will emit `missing`).
+  - `unreachable_response` — response declares content in a media type
+    fetcher won't consume (anything other than `application/json` or
+    `*/*`).
+
+- **`SpecCoverageReport.summary.withIntegrityIssues: number`** — route
+  count with at least one integrity issue.
+
+### Changed
+
+- **`TIER_0_BLOCKER_KEYWORDS` rewritten** to match v0.4.0's
+  `JSONSchemaToType` capabilities. `oneOf`, `anyOf`, `allOf` removed —
+  the converter handles them natively via union/intersection. Added:
+  `propertyNames`, `if`, `then`, `else`, `dependentSchemas`,
+  `dependentRequired`. `patternProperties` and `prefixItems` retained.
+
+  **Migration:** routes that previously fell back because of
+  `oneOf`/`anyOf`/`allOf` will now be reported as fully typed. This is
+  a more accurate reflection of what the inference path actually does.
+  No changes needed unless CI gates were relying on the false negative.
+
+### Bundle impact
+
+- Core unchanged.
+- `./spec-tools`: ~2.3 → ~2.9 KB gz (~600 B for the four new walkers).
+- `./schema` and `./openapi` unchanged.
+
 ## [0.6.0] - 2026-04-18
 
 Adds post-validation transforms. Non-breaking.
