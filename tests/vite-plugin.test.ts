@@ -57,12 +57,20 @@ describe('fetcherPlugin', () => {
 
       const content = readFileSync(envDts, 'utf-8');
       expect(content).toContain('declare module \'virtual:fetcher\'');
-      // Imports come from '@bajustone/fetcher' and its subpaths — plus a
-      // relative `./paths` import for the generated paths.d.ts.
+      // Imports from '@bajustone/fetcher' and its subpaths.
       expect(content).toMatch(/from '@bajustone\/fetcher(\/[a-z-]+)?'/);
-      expect(content).toContain('from \'./paths\'');
-      // routes is typed against the generated paths interface, not bare Routes.
-      expect(content).toContain('export const routes: PathsToRoutes<paths>');
+      // routes is typed against the generated paths interface. The relative
+      // `./paths` reference uses dynamic-import type syntax (not a bare
+      // `import type` statement) so TypeScript reliably resolves it inside
+      // the ambient `declare module` block — see src/vite-plugin.ts for the
+      // full explanation.
+      expect(content).toContain('export const routes: PathsToRoutes<import(\'./paths\').paths>');
+      // Regression guard: the bare `paths` reference without dynamic-import
+      // syntax does not resolve in ambient declare-module blocks, and a
+      // top-level `import type` import would turn the file into a module
+      // (breaking `declare module 'virtual:fetcher'`).
+      expect(content).not.toContain('PathsToRoutes<paths>;');
+      expect(content).not.toMatch(/^import type \{ [^}]*paths/m);
       // Components enabled by default: schemas + validators declared on
       // virtual:fetcher with literal-keyed names (not Record<string, ...>),
       // so schemas.Nonexistent is a compile error and IDEs autocomplete
@@ -72,19 +80,16 @@ describe('fetcherPlugin', () => {
       expect(content).toContain('"Pet": JSONSchemaDefinition;');
       expect(content).toContain('"Error": JSONSchemaDefinition;');
       expect(content).toContain('export const validators: {');
-      expect(content).toContain('"Pet": StandardSchemaV1<unknown, components[\'schemas\']["Pet"]>;');
-      expect(content).toContain('"Error": StandardSchemaV1<unknown, components[\'schemas\']["Error"]>;');
+      // Validator output types use dynamic-import type syntax for the
+      // `components` reference — same reason as `paths`.
+      expect(content).toContain('"Pet": StandardSchemaV1<unknown, import(\'./paths\').components[\'schemas\']["Pet"]>;');
+      expect(content).toContain('"Error": StandardSchemaV1<unknown, import(\'./paths\').components[\'schemas\']["Error"]>;');
       // Regression guard: the old Record<...> shape is gone
       expect(content).not.toContain('Record<string, JSONSchemaDefinition>');
       expect(content).not.toContain('Record<string, StandardSchemaV1<unknown, unknown>>');
       // Regression guard: the old bare Routes type is gone
       expect(content).not.toContain('export const routes: Routes');
       expect(content).toContain('declare module \'virtual:fetcher/inlined\'');
-      // `./paths` is re-introduced deliberately (paths-typed virtual:fetcher).
-      // Unlike the earlier SvelteKit-fragility case, this relative import is
-      // plugin-controlled: `paths.d.ts` and `fetcher-env.d.ts` are co-emitted
-      // in the same output dir, so the path is stable by construction.
-      expect(content).toContain('from \'./paths\'');
     });
   });
 
@@ -213,10 +218,9 @@ describe('fetcherPlugin with components: false', () => {
     // routes is still typed against the generated paths interface, even
     // when components are off — only the component-derived exports are
     // suppressed.
-    expect(content).toContain('export const routes: PathsToRoutes<paths>');
-    expect(content).toContain('from \'./paths\'');
-    // With components off, the `components` identifier isn't imported.
-    expect(content).not.toContain('{ components, paths }');
+    expect(content).toContain('export const routes: PathsToRoutes<import(\'./paths\').paths>');
+    // With components off, the `components` side of ./paths isn't referenced.
+    expect(content).not.toContain('import(\'./paths\').components');
     expect(content).not.toContain('export const schemas');
     expect(content).not.toContain('export const validators');
     expect(content).not.toContain('virtual:fetcher/inlined');
