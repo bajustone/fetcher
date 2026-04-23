@@ -1,6 +1,13 @@
 import type { FetcherError, FetchFn, Schema } from '../src/types.ts';
 import { describe, expect, it } from 'bun:test';
-import { createFetch, extractErrorMessage, FetcherRequestError } from '../src/fetcher.ts';
+import {
+  createFetch,
+  extractErrorMessage,
+  FetcherHTTPError,
+  FetcherNetworkError,
+  FetcherRequestError,
+  FetcherValidationError,
+} from '../src/fetcher.ts';
 import { authBearer } from '../src/middleware.ts';
 
 /** Helper to create a mock fetch that returns a JSON response */
@@ -1177,6 +1184,190 @@ describe('.unwrap()', () => {
         status: 403,
         body: { error: { message: 'Forbidden' } },
       });
+    }
+  });
+});
+
+describe('getHeaders (per-request dynamic headers)', () => {
+  it('calls getHeaders once per request and merges into outgoing headers', async () => {
+    let calls = 0;
+    const seenAuth: Array<string | null> = [];
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      getHeaders: () => {
+        calls += 1;
+        return { Authorization: `Bearer token-${calls}` };
+      },
+      fetch: async (req) => {
+        seenAuth.push(req.headers.get('authorization'));
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+    await f.get('/a').result();
+    await f.get('/b').result();
+    expect(calls).toBe(2);
+    expect(seenAuth).toEqual(['Bearer token-1', 'Bearer token-2']);
+  });
+
+  it('applies the documented precedence: defaultHeaders < getHeaders < callHeaders', async () => {
+    const seen: Headers[] = [];
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      defaultHeaders: { 'X-Common': 'default', 'X-Shared': 'default' },
+      getHeaders: () => ({ 'X-Shared': 'dynamic', 'X-Dynamic': 'dynamic' }),
+      fetch: async (req) => {
+        seen.push(req.headers);
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+    await f.get('/', { headers: { 'X-Shared': 'call' } }).result();
+    expect(seen.length).toBe(1);
+    const h = seen[0]!;
+    // defaultHeaders-only key survives
+    expect(h.get('x-common')).toBe('default');
+    // getHeaders overrides defaultHeaders for shared keys
+    expect(h.get('x-dynamic')).toBe('dynamic');
+    // per-call headers win over both layers
+    expect(h.get('x-shared')).toBe('call');
+  });
+
+  it('supports async getHeaders', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      getHeaders: async () => {
+        await new Promise(r => setTimeout(r, 1));
+        return { 'X-Async': 'yes' };
+      },
+      fetch: async req => new Response(JSON.stringify({
+        async: req.headers.get('x-async'),
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    });
+    const r = await f.get('/').result();
+    expect(r.ok).toBe(true);
+    if (r.ok)
+      expect(r.data).toEqual({ async: 'yes' });
+  });
+
+  it('surfaces getHeaders errors as kind: network', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      getHeaders: () => { throw new Error('token lookup failed'); },
+      fetch: async () => new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    });
+    const r = await f.get('/').result();
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.kind).toBe('network');
+      if (r.error.kind === 'network')
+        expect((r.error.cause as Error).message).toBe('token lookup failed');
+    }
+  });
+
+  it('surfaces async getHeaders rejections as kind: network', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      getHeaders: async () => { throw new Error('async token lookup failed'); },
+      fetch: async () => new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    });
+    const r = await f.get('/').result();
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.error.kind === 'network')
+      expect((r.error.cause as Error).message).toBe('async token lookup failed');
+  });
+});
+
+describe('.unwrap() error subclasses', () => {
+  it('throws FetcherHTTPError on 4xx/5xx', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({ message: 'Not found' }, 404),
+    });
+    try {
+      await f.get('/users/999').unwrap();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      // Narrows without touching .fetcherError.kind
+      expect(err).toBeInstanceOf(FetcherHTTPError);
+      expect(err).toBeInstanceOf(FetcherRequestError);
+      expect(err).not.toBeInstanceOf(FetcherNetworkError);
+      expect(err).not.toBeInstanceOf(FetcherValidationError);
+      const e = err as FetcherHTTPError;
+      expect(e.name).toBe('FetcherHTTPError');
+      expect(e.status).toBe(404);
+      expect(e.body).toEqual({ message: 'Not found' });
+      expect(e.fetcherError.kind).toBe('http');
+    }
+  });
+
+  it('throws FetcherNetworkError on transport failure', async () => {
+    const raw = new Error('Connection refused');
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: async () => { throw raw; },
+    });
+    try {
+      await f.get('/users').unwrap();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(FetcherNetworkError);
+      expect(err).toBeInstanceOf(FetcherRequestError);
+      expect(err).not.toBeInstanceOf(FetcherHTTPError);
+      const e = err as FetcherNetworkError;
+      expect(e.name).toBe('FetcherNetworkError');
+      expect(e.status).toBe(500);
+      expect(e.cause).toBe(raw);
+      expect(e.fetcherError.kind).toBe('network');
+    }
+  });
+
+  it('throws FetcherValidationError on schema rejection', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({ id: 'not-a-number' }),
+      routes: {
+        '/users': {
+          GET: {
+            response: schema((data) => {
+              const obj = data as Record<string, unknown>;
+              if (typeof obj.id !== 'number')
+                throw new Error('id must be a number');
+              return obj;
+            }),
+          },
+        },
+      },
+    });
+    try {
+      await f.get('/users').unwrap();
+      expect.unreachable('should have thrown');
+    }
+    catch (err) {
+      expect(err).toBeInstanceOf(FetcherValidationError);
+      expect(err).toBeInstanceOf(FetcherRequestError);
+      expect(err).not.toBeInstanceOf(FetcherHTTPError);
+      const e = err as FetcherValidationError;
+      expect(e.name).toBe('FetcherValidationError');
+      expect(e.status).toBe(500);
+      expect(e.location).toBe('response');
+      expect(e.issues.length).toBeGreaterThan(0);
+      expect(e.fetcherError.kind).toBe('validation');
     }
   });
 });

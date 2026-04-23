@@ -44,12 +44,18 @@
  * @module
  */
 
-export { createFetch, extractErrorMessage, FetcherRequestError } from './fetcher.ts';
+export {
+  createFetch,
+  extractErrorMessage,
+  FetcherHTTPError,
+  FetcherNetworkError,
+  FetcherRequestError,
+  FetcherValidationError,
+} from './fetcher.ts';
 export type { JSONSchemaToType } from './infer-spec.ts';
 export { authBearer, bearerWithRefresh, retry, timeout } from './middleware.ts';
 
 export type { BearerWithRefreshOptions } from './middleware.ts';
-
 export type {
   AvailableMethods,
   AvailablePaths,
@@ -71,6 +77,7 @@ export type {
   OpenAPILowercaseMethod,
   OpenAPIPaths,
   OpenAPISuccessStatus,
+  PathsToRoutes,
   QueryDescriptor,
   ResolveBodyFor,
   ResolveBodyFromPaths,
@@ -96,3 +103,5 @@ export type {
   TypedFetchPromise,
   TypedResponse,
 } from './types.ts';
+
+export { withInputType } from './with-input-type.ts';

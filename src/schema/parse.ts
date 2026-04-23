@@ -79,3 +79,75 @@ export function parseOrThrow<T>(
     throw new SchemaValidationError(r.issues);
   return r.value as T;
 }
+
+/**
+ * Groups a list of Standard Schema V1 issues by the first path segment,
+ * keeping the first issue per field. Issues whose `path` is empty or
+ * undefined are collected under the `'_form'` key.
+ *
+ * Convention (opinionated; matches the common form-library shape):
+ * - Keys are stringified first-path-segment values.
+ * - Path segments of the `{ key }` wrapper form are unwrapped and
+ *   `String`-coerced.
+ * - Only the first issue per field survives — later issues for the same
+ *   field are dropped.
+ *
+ * Useful as the bare transform when you need the errors map without the
+ * `{ ok }` envelope from {@link parseForm}.
+ */
+export function groupIssuesByField(
+  issues: ReadonlyArray<StandardSchemaV1Issue>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const issue of issues) {
+    const first = issue.path?.[0];
+    let key: string;
+    if (first === undefined || first === null) {
+      key = '_form';
+    }
+    else if (typeof first === 'object' && 'key' in first) {
+      key = String(first.key);
+    }
+    else {
+      key = String(first);
+    }
+    if (!(key in out))
+      out[key] = issue.message;
+  }
+  return out;
+}
+
+/**
+ * Validates form-shaped data and returns a `{ ok, value } | { ok, errors,
+ * issues }` discriminated union. On failure, `errors` is the field-keyed map
+ * produced by {@link groupIssuesByField} — ready to drop into a form library
+ * that expects `Record<fieldName, message>`. `issues` retains the full raw
+ * list for callers that want richer error UX.
+ *
+ * Sync only — throws `TypeError` if the schema's validator returns a Promise.
+ * Builder-produced schemas are always synchronous.
+ *
+ * @example
+ * ```ts
+ * const result = parseForm(loginSchema, formData);
+ * if (!result.ok) return { errors: result.errors };
+ * login(result.value);
+ * ```
+ */
+export function parseForm<T>(
+  schema: StandardSchemaV1<unknown, T>,
+  data: unknown,
+):
+  | { readonly ok: true; readonly value: T }
+  | {
+    readonly ok: false;
+    readonly errors: Record<string, string>;
+    readonly issues: ReadonlyArray<StandardSchemaV1Issue>;
+  } {
+  const r = schema['~standard'].validate(data);
+  if (r instanceof Promise)
+    throw new TypeError('parseForm requires a synchronous schema; use await schema[\'~standard\'].validate(data) for async validators');
+  if (r.issues)
+    return { ok: false, errors: groupIssuesByField(r.issues), issues: r.issues };
+  return { ok: true, value: r.value as T };
+}

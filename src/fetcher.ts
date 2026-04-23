@@ -58,6 +58,7 @@ export function createFetch<
     routes,
     middleware = [],
     defaultHeaders,
+    getHeaders,
     fetch: defaultFetchFn,
     timeout: configTimeout,
     retry: configRetry,
@@ -184,8 +185,28 @@ export function createFetch<
         url += `?${qs}`;
     }
 
-    // Build headers
+    // Build headers. Precedence (later overrides earlier):
+    //   defaultHeaders → getHeaders() → per-call headers.
+    // `getHeaders` runs once per request; its thrown/rejected errors
+    // surface as `kind: 'network'` so `.result()` never throws.
     const headers = new Headers(defaultHeaders);
+    if (getHeaders) {
+      let dynamic: Record<string, string>;
+      try {
+        const maybe = getHeaders();
+        dynamic = maybe instanceof Promise ? await maybe : maybe;
+      }
+      catch (cause) {
+        return wrapResponse(
+          Response.error(),
+          responseSchema,
+          errorResponseSchema,
+          { kind: 'network', cause },
+        );
+      }
+      for (const [key, value] of Object.entries(dynamic))
+        headers.set(key, value);
+    }
     if (callHeaders) {
       const h = new Headers(callHeaders as Record<string, string>);
       h.forEach((value, key) => headers.set(key, value));
@@ -257,7 +278,7 @@ export function createFetch<
     const unwrapFn = (): Promise<unknown> => resultFn().then((r) => {
       if (r.ok)
         return r.data;
-      throw new FetcherRequestError(r.error);
+      throw toRequestError(r.error);
     });
     return Object.assign(promise, {
       result: resultFn,
@@ -471,34 +492,138 @@ function buildQueryKey(
 
 /**
  * Error thrown by {@link TypedFetchPromise.unwrap} when the result is not ok.
+ * Base class of {@link FetcherNetworkError}, {@link FetcherValidationError},
+ * and {@link FetcherHTTPError} — catch `FetcherRequestError` to handle any
+ * unwrap failure, or `instanceof` the subclass you care about for narrowed
+ * access to `cause` / `issues` / `body`.
+ *
  * Carries the full {@link FetcherError} discriminated union plus a derived
  * HTTP `status` code so framework error boundaries can map it directly.
  *
  * - `kind: 'http'` → `status` is the HTTP status code (4xx/5xx)
  * - `kind: 'network'` or `'validation'` → `status` is `500`
  *
- * Works with `instanceof` in catch blocks across all frameworks:
- *
  * ```typescript
  * try {
  *   const data = await api.get('/users').unwrap();
  * } catch (err) {
- *   if (err instanceof FetcherRequestError) {
- *     err.status;        // number
- *     err.fetcherError;  // FetcherError — full discriminated union
+ *   if (err instanceof FetcherHTTPError) {
+ *     // err.body is narrowed to the declared 4xx response type
+ *     err.status;
+ *   } else if (err instanceof FetcherValidationError) {
+ *     err.issues; // readonly StandardSchemaV1Issue[]
+ *   } else if (err instanceof FetcherNetworkError) {
+ *     err.cause;  // unknown — the raw transport failure
+ *   }
+ * }
+ * ```
+ *
+ * The `Body` generic flows through from {@link TypedFetchPromise} and is
+ * narrowed on {@link FetcherHTTPError}. `FetcherRequestError<Body>.fetcherError`
+ * remains the full discriminated union.
+ */
+export class FetcherRequestError<Body = unknown> extends Error {
+  readonly fetcherError: FetcherError<Body>;
+  readonly status: number;
+
+  constructor(error: FetcherError<Body>) {
+    super(extractErrorMessage(error as FetcherError));
+    this.name = 'FetcherRequestError';
+    this.fetcherError = error;
+    this.status = error.kind === 'http' ? error.status : 500;
+  }
+}
+
+/**
+ * Subclass of {@link FetcherRequestError} thrown when the underlying fetch
+ * rejected (network failure, DNS failure, AbortError not triggered by the
+ * user's signal, etc.). `cause` holds the raw thrown value.
+ *
+ * ```ts
+ * try { await api.get('/pets').unwrap(); }
+ * catch (err) {
+ *   if (err instanceof FetcherNetworkError) err.cause;
+ * }
+ * ```
+ */
+export class FetcherNetworkError extends FetcherRequestError {
+  constructor(cause: unknown) {
+    super({ kind: 'network', cause });
+    this.name = 'FetcherNetworkError';
+  }
+
+  override get cause(): unknown {
+    const e = this.fetcherError;
+    return e.kind === 'network' ? e.cause : undefined;
+  }
+}
+
+/**
+ * Subclass of {@link FetcherRequestError} thrown when a Standard Schema V1
+ * validator rejected the request body/params/query (client-side, before the
+ * request left the process) or the response body (server-side).
+ *
+ * `location` tells you which slot failed; `issues` is the raw issue list.
+ */
+export class FetcherValidationError extends FetcherRequestError {
+  constructor(location: FetcherErrorLocation, issues: ReadonlyArray<StandardSchemaV1Issue>) {
+    super({ kind: 'validation', location, issues });
+    this.name = 'FetcherValidationError';
+  }
+
+  get location(): FetcherErrorLocation {
+    const e = this.fetcherError;
+    // Narrowed at runtime — subclass is only constructed with kind: 'validation'.
+    return (e as Extract<FetcherError, { kind: 'validation' }>).location;
+  }
+
+  get issues(): ReadonlyArray<StandardSchemaV1Issue> {
+    const e = this.fetcherError;
+    return (e as Extract<FetcherError, { kind: 'validation' }>).issues;
+  }
+}
+
+/**
+ * Subclass of {@link FetcherRequestError} thrown on a 4xx/5xx HTTP response.
+ * `status` is the HTTP status code; `body` is the parsed (and, if the route
+ * declared an `errorResponse` schema, validated) error body, narrowed to the
+ * spec's declared error shape via the `Body` generic.
+ *
+ * ```ts
+ * try { await api.get('/pets/{id}').unwrap(); }
+ * catch (err) {
+ *   if (err instanceof FetcherHTTPError && err.status === 404) {
+ *     err.body; // narrowed to the 4xx response schema
  *   }
  * }
  * ```
  */
-export class FetcherRequestError extends Error {
-  readonly fetcherError: FetcherError;
-  readonly status: number;
+export class FetcherHTTPError<Body = unknown> extends FetcherRequestError<Body> {
+  constructor(status: number, body: Body) {
+    super({ kind: 'http', status, body });
+    this.name = 'FetcherHTTPError';
+  }
 
-  constructor(error: FetcherError) {
-    super(extractErrorMessage(error));
-    this.name = 'FetcherRequestError';
-    this.fetcherError = error;
-    this.status = error.kind === 'http' ? error.status : 500;
+  get body(): Body {
+    const e = this.fetcherError;
+    // Narrowed at runtime — subclass is only constructed with kind: 'http'.
+    return (e as Extract<FetcherError<Body>, { kind: 'http' }>).body;
+  }
+}
+
+/**
+ * Dispatches a {@link FetcherError} to the matching {@link FetcherRequestError}
+ * subclass. Used by `.unwrap()` so thrown errors are `instanceof`-narrowable
+ * without the `err.fetcherError.kind === 'http'` dance.
+ */
+function toRequestError(error: FetcherError): FetcherRequestError {
+  switch (error.kind) {
+    case 'network':
+      return new FetcherNetworkError(error.cause);
+    case 'validation':
+      return new FetcherValidationError(error.location, error.issues);
+    case 'http':
+      return new FetcherHTTPError(error.status, error.body);
   }
 }
 

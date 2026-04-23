@@ -17,8 +17,10 @@ import {
   email,
   enum_,
   extend,
+  extendSchema,
   finite,
   formatIssues,
+  groupIssuesByField,
   integer,
   intersect,
   keyof_,
@@ -35,6 +37,7 @@ import {
   omit,
   optional,
   parse,
+  parseForm,
   parseOrThrow,
   partial,
   pick,
@@ -749,5 +752,101 @@ describe('formatIssues', () => {
   it('root-level issue has no path prefix', () => {
     const r = run(string(), 42);
     expect(formatIssues(r.issues ?? [])).toBe('Expected string');
+  });
+});
+
+describe('extendSchema', () => {
+  it('extends a compiled FSchema base with new properties', () => {
+    const base = object({ email: string(), password: string() });
+    // Erase the base's FObject<Props> typing to simulate a fromJSONSchema
+    // validator or a validators.* entry from virtual:fetcher.
+    const opaque = base as unknown as FSchema<{ email: string; password: string }>;
+
+    const extended = extendSchema(opaque, {
+      id: number(),
+      role: optional(string()),
+    });
+
+    const r = run(extended, { email: 'a@b.com', password: 'x', id: 1, role: 'admin' });
+    const value = ok(r);
+    expect(value).toEqual({ email: 'a@b.com', password: 'x', id: 1, role: 'admin' });
+
+    // Compile-time check that the extended type intersects base & extras
+    type Out = Infer<typeof extended>;
+    const _check: Out = value as Out;
+    void _check;
+  });
+
+  it('missing required extension field produces an issue', () => {
+    const base = object({ email: string() }) as unknown as FSchema<{ email: string }>;
+    const extended = extendSchema(base, { id: number() });
+    const r = run(extended, { email: 'a@b.com' });
+    expect(issues(r).length).toBeGreaterThan(0);
+  });
+});
+
+describe('groupIssuesByField', () => {
+  it('keys on the first path segment and keeps the first issue per field', () => {
+    const s = object({
+      email: string({ pattern: '^.+@.+$' }),
+      password: string({ minLength: 8 }),
+    });
+    const r = run(s, { email: 'bad', password: 'x' });
+    const grouped = groupIssuesByField(r.issues ?? []);
+    expect(Object.keys(grouped).sort()).toEqual(['email', 'password']);
+    expect(typeof grouped.email).toBe('string');
+    expect(typeof grouped.password).toBe('string');
+  });
+
+  it('uses _form for path-less issues', () => {
+    const grouped = groupIssuesByField([{ message: 'root failure' }]);
+    expect(grouped).toEqual({ _form: 'root failure' });
+  });
+
+  it('unwraps { key } path segments', () => {
+    const grouped = groupIssuesByField([
+      { message: 'x', path: [{ key: 'field' }] },
+    ]);
+    expect(grouped).toEqual({ field: 'x' });
+  });
+
+  it('keeps only the first issue per field', () => {
+    const grouped = groupIssuesByField([
+      { message: 'first', path: ['a'] },
+      { message: 'second', path: ['a'] },
+    ]);
+    expect(grouped).toEqual({ a: 'first' });
+  });
+});
+
+describe('parseForm', () => {
+  it('returns { ok: true, value } on success', () => {
+    const s = object({ email: string(), password: string() });
+    const r = parseForm(s, { email: 'a@b.com', password: 'secret' });
+    expect(r.ok).toBe(true);
+    if (r.ok)
+      expect(r.value).toEqual({ email: 'a@b.com', password: 'secret' });
+  });
+
+  it('returns { ok: false, errors, issues } on failure', () => {
+    const s = object({ email: string(), password: string({ minLength: 8 }) });
+    const r = parseForm(s, { email: 'a@b.com', password: 'x' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors).toHaveProperty('password');
+      expect(typeof r.errors.password).toBe('string');
+      expect(r.issues.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('throws TypeError on async schemas', () => {
+    const asyncSchema: FSchema<string> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: async v => ({ value: v as string }),
+      },
+    };
+    expect(() => parseForm(asyncSchema, 'x')).toThrow(TypeError);
   });
 });

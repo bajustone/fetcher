@@ -10,6 +10,7 @@
 import type {
   FEnum,
   FObject,
+  FObjectOutput,
   FOptionalWrapper,
   FProperties,
   FSchema,
@@ -108,6 +109,41 @@ export function extend<T extends FProperties, E extends FProperties>(
   const out: Record<string, FSchema<unknown> | FOptionalWrapper<FSchema<unknown>>>
     = { ...src, ...(extras as Record<string, FSchema<unknown> | FOptionalWrapper<FSchema<unknown>>>) };
   return object(out as FProperties) as unknown as FObject<Omit<T, keyof E> & E>;
+}
+
+/**
+ * Like {@link extend}, but accepts a base whose properties are not statically
+ * known at the type level — e.g. a validator produced by `fromJSONSchema` or
+ * the `validators.*` entries exported from `virtual:fetcher`. Those are
+ * structurally `FObject<FProperties>` at runtime but typed as `FSchema<Base>`,
+ * which makes {@link extend} unusable without a cast.
+ *
+ * `extendSchema` takes the loose input shape and produces an explicit
+ * `FSchema<Base & FObjectOutput<Ext>>` output. Runtime behavior is identical
+ * to {@link extend} — same property merging, same required-list rebuild.
+ *
+ * Prefer {@link extend} when the base is a locally-defined `FObject<Props>`;
+ * reach for `extendSchema` when the base is an opaque validator.
+ *
+ * @example
+ * ```ts
+ * import { validators } from 'virtual:fetcher';
+ * import { extendSchema, number } from '@bajustone/fetcher/schema';
+ *
+ * // validators.CreateUserBody is typed FSchema<CreateUserBody>, not FObject<Props>
+ * const withId = extendSchema(validators.CreateUserBody, { id: number() });
+ * //    ^? FSchema<CreateUserBody & { id: number }>
+ * ```
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export function extendSchema<Base, Ext extends FProperties>(
+  base: FSchema<Base>,
+  ext: Ext,
+): FSchema<Base & FObjectOutput<Ext>> {
+  return extend(
+    base as unknown as FObject<FProperties>,
+    ext,
+  ) as unknown as FSchema<Base & FObjectOutput<Ext>>;
 }
 
 /* @__NO_SIDE_EFFECTS__ */

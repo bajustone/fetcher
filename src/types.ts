@@ -519,17 +519,22 @@ export type AvailablePaths<R extends Routes, OAS>
     : (keyof R & string) | (string & {});
 
 /**
- * Method-key constraint per path. With OAS supplied, the constraint is left
- * as `string` so the call site can pass any uppercase method. Method
- * autocomplete on OAS paths is intentionally not provided here — combining
- * `Uppercase<...>` with the `(string & {})` literal-inference trick interacts
- * badly with TypeScript's inference, collapsing `M` to `never` for methods
- * not declared in the spec. The Routes branch retains the existing
- * autocomplete behavior because it doesn't need a case-folding wrapper.
+ * Method-key constraint per path. With OAS supplied, the lowercase method
+ * keys from the generated `paths` interface are uppercased (to match the
+ * runtime `Routes` table) and restricted to the five verbs the library
+ * supports (`options` / `head` / `trace` are dropped). The `(string & {})`
+ * tail preserves literal-autocomplete while still accepting arbitrary
+ * strings — so paths/methods not declared in the spec fall through to
+ * {@link UntypedFetchOptions} via {@link IsTypedCall}.
+ *
+ * The Routes branch retains the existing autocomplete behavior because it
+ * doesn't need a case-folding wrapper.
  */
 export type AvailableMethods<R extends Routes, OAS, Path extends string>
   = HasPaths<OAS> extends true
-    ? string
+    ? Path extends keyof OAS
+      ? Uppercase<Extract<keyof OAS[Path], LowercaseHttpMethod>> | (string & {})
+      : string
     : Path extends keyof R
       ? (keyof R[Path] & string) | (string & {})
       : string;
@@ -616,6 +621,36 @@ export type ResolveErrorResponseFor<R extends Routes, OAS, P extends string, M e
 // ---------------------------------------------------------------------------
 // Schema extraction
 // ---------------------------------------------------------------------------
+
+/**
+ * Walks an `openapi-typescript`-generated `paths` interface and produces a
+ * narrow {@link Routes} shape where each slot (`body`, `params`, `query`,
+ * `response`, `errorResponse`) is typed to the specific JSON-Schema output
+ * that applies at that path × method — inferred via the same
+ * {@link ResolveBodyFromPaths} / {@link ResolveResponseFromPaths} family
+ * used at call sites.
+ *
+ * Method keys are emitted uppercase (`POST`, `GET`) to match the runtime
+ * `Routes` table populated by {@link fromOpenAPI} and `extractRouteSchemas`.
+ * Non-supported HTTP verbs in the spec (`options`, `head`, `trace`) are
+ * filtered out.
+ *
+ * **Intended consumer:** the Vite/Rollup plugin's `virtual:fetcher` type
+ * declaration. With this alias, `routes[path][method].body` resolves to
+ * `Schema<ConcreteBody>` instead of the bare `Schema` that users previously
+ * had to re-derive via a shim file.
+ */
+export type PathsToRoutes<P> = {
+  [Path in keyof P & string]: {
+    [M in keyof P[Path] & LowercaseHttpMethod as Uppercase<M>]: {
+      body?: Schema<ResolveBodyFromPaths<P, Path, Uppercase<M>>>;
+      params?: Schema<ResolveParamsFromPaths<P, Path, Uppercase<M>>>;
+      query?: Schema<ResolveQueryFromPaths<P, Path, Uppercase<M>>>;
+      response?: Schema<ResolveResponseFromPaths<P, Path, Uppercase<M>>>;
+      errorResponse?: Schema<ResolveErrorResponseFromPaths<P, Path, Uppercase<M>>>;
+    };
+  };
+};
 
 /**
  * Extracts a named component schema from an `openapi-typescript`-generated
@@ -718,6 +753,39 @@ export interface FetchConfig<R extends Routes = Routes> {
   middleware?: Middleware[];
   /** Default headers merged into every outgoing request. Per-call headers win. */
   defaultHeaders?: Record<string, string>;
+  /**
+   * Called once per request (after `defaultHeaders`, before per-call
+   * `headers`) to produce headers that depend on per-request state —
+   * auth tokens read from a request-scoped context, CSRF tokens, a trace
+   * ID, etc.
+   *
+   * The classic use case is server-side rendering where each request has
+   * its own auth context (SvelteKit's `getRequestEvent().cookies`,
+   * Cloudflare Workers' per-request env, Next.js server actions). The
+   * middleware chain gives you the same power but requires writing a
+   * middleware wrapper at every client; `getHeaders` is the one-line
+   * shortcut for the common "inject a few dynamic headers" case.
+   *
+   * **Header precedence** (later overrides earlier):
+   * `defaultHeaders` → `getHeaders()` → per-call `headers`
+   *
+   * May return a Promise for async sources (token refresh, async context
+   * lookup). Errors thrown from `getHeaders` surface as a
+   * `kind: 'network'` error via `.result()`.
+   *
+   * @example
+   * ```ts
+   * export const api = createFetch({
+   *   baseUrl,
+   *   routes,
+   *   getHeaders: () => {
+   *     const { accessToken } = getAuthCookies(getRequestEvent().cookies);
+   *     return { Authorization: `Bearer ${accessToken}` };
+   *   },
+   * });
+   * ```
+   */
+  getHeaders?: () => Record<string, string> | Promise<Record<string, string>>;
   /**
    * Custom fetch implementation. Useful for SvelteKit's load `fetch`,
    * Cloudflare Workers, or test mocks. Defaults to `globalThis.fetch`.

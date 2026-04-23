@@ -40,6 +40,7 @@ export {
 
 export {
   extend,
+  extendSchema,
   keyof_,
   merge,
   omit,
@@ -60,7 +61,7 @@ export { brand, describe, title } from './meta.ts';
 
 export type { Brand } from './meta.ts';
 
-export { parse, parseOrThrow, SchemaValidationError } from './parse.ts';
+export { groupIssuesByField, parse, parseForm, parseOrThrow, SchemaValidationError } from './parse.ts';
 
 export {
   any_,
