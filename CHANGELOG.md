@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.7.1] - 2026-04-23
+
+### Added
+- v0.8.0 — friction-list items 1, 2, 5, 6, 7, 10, 13, 14
+
 ## [0.7.0] - 2026-04-18
 
 Widened `spec-tools.coverage` — anything it can statically flag is a
