@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.0] - 2026-04-24
+
+### Added
+- feat(middleware): add cookieAuth and parseSetCookie
+
 ## [0.8.0] - 2026-04-23
 
 ### Fixed
