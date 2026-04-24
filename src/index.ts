@@ -53,9 +53,9 @@ export {
   FetcherValidationError,
 } from './fetcher.ts';
 export type { JSONSchemaToType } from './infer-spec.ts';
-export { authBearer, bearerWithRefresh, retry, timeout } from './middleware.ts';
+export { authBearer, bearerWithRefresh, cookieAuth, parseSetCookie, retry, timeout } from './middleware.ts';
 
-export type { BearerWithRefreshOptions } from './middleware.ts';
+export type { BearerWithRefreshOptions, CookieAuthOptions } from './middleware.ts';
 export type {
   AvailableMethods,
   AvailablePaths,
