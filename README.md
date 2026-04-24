@@ -9,7 +9,7 @@ Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.j
 [openapi-fetch](https://openapi-ts.dev/openapi-fetch/) gives you typed paths from an OpenAPI spec. fetcher does that too, and adds:
 
 - **Runtime validation** — responses are validated against your schemas at runtime, not just at compile time. Catch API drift before it breaks your UI.
-- **Recursive middleware** — Hono/Koa-shaped dispatcher with per-call override (`middleware: false`). Built-in `bearerWithRefresh` with concurrent-401 dedup and typed `exclude`.
+- **Recursive middleware** — Hono/Koa-shaped dispatcher with per-call override (`middleware: false`). Built-in `bearerWithRefresh` and `cookieAuth` with concurrent-401 dedup and typed `exclude`.
 - **Batteries included** — retry with backoff/jitter, timeout, error extraction, `.result()` / `.unwrap()` / `.query()` primitives, instance forking via `.with()`.
 - **Standard Schema V1** — not locked to Zod. Works with the bundled native schema builder, Valibot, ArkType, or any value with `~standard.validate`.
 
@@ -23,7 +23,7 @@ Published on [JSR](https://jsr.io/@bajustone/fetcher). Runs on Bun, Deno, Node.j
 - **OpenAPI 3.x** — `fromOpenAPI(spec)` (from `@bajustone/fetcher/openapi`) builds runtime validators from a spec. Pass an `openapi-typescript`-generated `paths` interface as a generic for full body/response/error type inference.
 - **Vite/Rollup plugin** — `fetcherPlugin()` auto-generates `paths.d.ts`, provides a `virtual:fetcher` module exporting pre-built route schemas, and watches the spec for changes during dev. Optionally fetches the spec from a remote URL. Import as `@bajustone/fetcher/vite`.
 - **Composable middleware** — Hono/Koa-shaped recursive dispatcher. Per-call `middleware: false` or `middleware: [...]` override.
-- **Built-in middlewares** — `authBearer`, `bearerWithRefresh` (with concurrent-401 dedup and typed `exclude` list), `timeout`, `retry` (exponential backoff with jitter, honors `Retry-After`).
+- **Built-in middlewares** — `authBearer`, `bearerWithRefresh` (with concurrent-401 dedup and typed `exclude` list), `cookieAuth` (login/refresh dance for server-side cookie sessions), `timeout`, `retry` (exponential backoff with jitter, honors `Retry-After`). Plus `parseSetCookie` for converting `Set-Cookie` response headers into `Cookie` request strings.
 - **Built-in error extraction** — `extractErrorMessage(error)` turns any `FetcherError` into a human-readable string. No per-project helper needed.
 - **Method shortcuts** — `f.get(path)`, `f.post(path, opts)`, etc.
 - **Instance forking** — `f.with(overrides)` returns a sibling client inheriting everything from the parent except the named overrides.
@@ -731,6 +731,7 @@ const f = createFetch<paths>({
 |---|---|
 | `authBearer(getToken)` | Attaches `Authorization: Bearer <token>` per request. |
 | `bearerWithRefresh<Paths>(opts)` | Bearer auth + 401-refresh-retry. Concurrent 401s share one in-flight refresh. The `exclude` field lists paths that skip auth entirely — typed against the `Paths` generic for autocomplete and compile-time typo checking. |
+| `cookieAuth<Paths>(opts)` | Cookie session auth for server-side runtimes: lazy initial login, optional `refreshAfterMs` proactive refresh, reactive 401-driven re-login, single in-flight dedup. `exclude` is the same shape as `bearerWithRefresh`. |
 | `retry(opts)` | Re-invokes the chain on retryable failures. Defaults: 3 attempts, exponential backoff with jitter, retries on `[408, 425, 429, 500, 502, 503, 504]`. Honors `Retry-After`. |
 | `timeout(ms)` | Aborts a single request after `ms` ms. Merged with any user signal. |
 
@@ -766,9 +767,9 @@ const cacheMiddleware: Middleware = async (request, next) => {
 };
 ```
 
-### `exclude` matching in `bearerWithRefresh`
+### `exclude` matching in `bearerWithRefresh` and `cookieAuth`
 
-The `exclude` option determines which paths skip auth. It accepts four forms:
+Both `bearerWithRefresh` and `cookieAuth` accept the same four `exclude` shapes — paths matched here skip the auth/refresh logic entirely.
 
 | Form | Matching behavior |
 |---|---|
@@ -776,6 +777,63 @@ The `exclude` option determines which paths skip auth. It accepts four forms:
 | `string[]` | Exact match against any entry in the array. |
 | `RegExp` | Tested against the full request URL. |
 | `(request: Request) => boolean` | Arbitrary predicate — return `true` to skip auth. |
+
+### Cookie auth
+
+`cookieAuth` handles login + session refresh for runtimes that drive cookie state manually (Node / Deno / Bun / edge workers). For browser code with same-origin cookies, set `credentials: 'include'` on the underlying fetch and let the browser manage cookies — that's the right tool there; this middleware is for runtimes where it isn't.
+
+```typescript
+import { cookieAuth, createFetch, parseSetCookie } from '@bajustone/fetcher';
+
+const f = createFetch({
+  baseUrl: 'https://api.example.com',
+  middleware: [
+    cookieAuth({
+      login: async () => {
+        const r = await fetch('https://api.example.com/auth/login', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ user: USER, pass: PASS }),
+        });
+        if (!r.ok) throw new Error(`login failed: ${r.status}`);
+        return parseSetCookie(r.headers); // → "sid=abc; csrf=xyz"
+      },
+      refreshAfterMs: 25 * 60_000, // optional proactive refresh window
+      exclude: ['/auth/login'],    // login MUST be excluded
+    }),
+  ],
+});
+```
+
+Behavior:
+
+- **Lazy initial login** — `login` runs on the first non-excluded request, not at construction time.
+- **Proactive refresh** (optional `refreshAfterMs`) — re-login before the request is sent if the window has elapsed since the last successful login.
+- **Reactive refresh** — a 401 response triggers `login` and one retry, always active even when `refreshAfterMs` is set.
+- **Concurrent dedup** — a single in-flight login promise is shared; under load `login` runs at most once at a time.
+- **Body cloning** — the request is cloned per attempt, so stream bodies survive the retry.
+- **Login failure surfaces as `kind: 'network'`** via `.result()` — the 401 is "consumed" by the failed refresh; check `error.cause` for the original rejection.
+
+The login endpoint **must** be in `exclude` or the middleware deadlocks on its own 401. Why no separate `cookieWithRefresh`? Cookie auth doesn't have the access/refresh-token split that justifies a two-function API for bearer — the "refresh" *is* the login, so one entry point covers static-cookie, proactive-refresh, and reactive-refresh cases uniformly.
+
+### `parseSetCookie`
+
+Extracts `name=value` pairs from one or more `Set-Cookie` response headers and returns a `Cookie` request-header string. Strips all attributes (`Path`, `Domain`, `Expires`, `Max-Age`, `HttpOnly`, `Secure`, `SameSite`). Last-write-wins for duplicate names.
+
+```typescript
+import { parseSetCookie } from '@bajustone/fetcher';
+
+const r = await fetch('/auth/login', { method: 'POST', body });
+const cookie = parseSetCookie(r.headers); // "sid=abc; csrf=xyz"
+```
+
+Accepts:
+
+- `Headers` — uses `Headers.getSetCookie()` when available (Node ≥ 19.7, undici, modern browsers); falls back to `get('set-cookie')`.
+- `string[]` — one entry per `Set-Cookie` header. **Recommended for cross-runtime correctness** — avoids the comma-in-`Expires` ambiguity of the joined string form.
+- `string` — a single `Set-Cookie` header value.
+
+Empty / missing / null input returns `""`.
 
 ### Per-call overrides
 
@@ -827,6 +885,8 @@ export async function load({ fetch }) {
 | `FetcherRequestError` | Error class thrown by `.unwrap()`. Carries `.status`, `.fetcherError`, and `.message`. |
 | `authBearer(getToken)` | Bearer-token middleware. |
 | `bearerWithRefresh(opts)` | Bearer auth + 401-refresh-retry middleware with `exclude` list. |
+| `cookieAuth(opts)` | Cookie session middleware: login-driven init/refresh with concurrent dedup. |
+| `parseSetCookie(input)` | Parse one or more `Set-Cookie` headers into a ready-to-send `Cookie` header string. |
 | `retry(opts)` | Retry middleware (number shorthand or `RetryOptions`). |
 | `timeout(ms)` | Per-request timeout middleware. |
 
@@ -873,7 +933,7 @@ export async function load({ fetch }) {
 
 ### Types
 
-`TypedFetchFn`, `TypedFetchPromise`, `TypedResponse`, `ResultData`, `QueryDescriptor`, `FetcherError`, `FetcherErrorLocation`, `FetchConfig`, `Middleware`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `SchemaOf`, `StandardSchemaV1`, `BearerWithRefreshOptions<Paths>`, `FetcherPluginOptions`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, `InferRoutesFromSpec`, `InferOutput`.
+`TypedFetchFn`, `TypedFetchPromise`, `TypedResponse`, `ResultData`, `QueryDescriptor`, `FetcherError`, `FetcherErrorLocation`, `FetchConfig`, `Middleware`, `RetryOptions`, `RouteDefinition`, `Routes`, `Schema`, `SchemaOf`, `StandardSchemaV1`, `BearerWithRefreshOptions<Paths>`, `CookieAuthOptions<Paths>`, `FetcherPluginOptions`, `SpecDriftIssue`, `SpecCoverageReport`, `RouteCoverage`, `InferRoutesFromSpec`, `InferOutput`.
 
 See [`docs/architecture.md`](./docs/architecture.md) for implementation details.
 
