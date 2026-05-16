@@ -63,7 +63,6 @@ export function object<T extends FProperties>(
   const validators: Array<SyncValidate<unknown>> = [];
   const callIfMissing: boolean[] = [];
   const properties: Record<string, FSchema<unknown>> = {};
-  let anyDefaulted = false;
 
   for (const key in props) {
     const entry = props[key]!;
@@ -72,7 +71,6 @@ export function object<T extends FProperties>(
       keys.push(key);
       validators.push(entry['~standard'].validate as SyncValidate<unknown>);
       callIfMissing.push(true);
-      anyDefaulted = true;
     }
     else if (isOptional(entry)) {
       const inner = entry['~wrapped'];
@@ -118,7 +116,7 @@ export function object<T extends FProperties>(
               for (let j = 0; j < r.issues.length; j++)
                 issues.push(prependPath(k, r.issues[j]!));
             }
-            else if (missing && anyDefaulted) {
+            else if (r.value !== obj[k]) {
               out ??= { ...obj };
               out[k] = r.value;
             }
