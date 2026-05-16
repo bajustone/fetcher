@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1] - 2026-05-16
+
+### Added
+- docs: cover cookieAuth + parseSetCookie
+
+### Fixed
+- fix
+
 ## [0.9.0] - 2026-04-24
 
 ### Added
