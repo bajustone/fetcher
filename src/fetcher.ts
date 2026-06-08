@@ -164,11 +164,30 @@ export function createFetch<
       );
     }
 
-    // Build URL
+    // Build URL. A missing path parameter is converted into a precomputed
+    // validation error (never thrown) so `.result()` resolves to
+    // `{ ok: false, ... }` like every other client-side failure mode.
+    const missingParams: string[] = [];
     let url = interpolatePath(
       `${baseUrl}${path}`,
       params as Record<string, string> | undefined,
+      missingParams,
     );
+    if (missingParams.length) {
+      return wrapResponse(
+        Response.error(),
+        responseSchema,
+        errorResponseSchema,
+        makeValidationError(
+          'params',
+          missingParams.map(key => ({
+            code: 'missing',
+            message: `Missing path parameter: ${key}`,
+            path: [key],
+          })),
+        ),
+      );
+    }
 
     // Query params
     if (query && typeof query === 'object') {
@@ -449,16 +468,24 @@ async function computeResult<T, HttpErrorBody>(
   }
 }
 
+/**
+ * Substitutes `{param}` placeholders in `path`. Any placeholder whose key is
+ * absent from `params` is pushed onto `missing` (instead of throwing), so the
+ * caller can surface it as a precomputed `kind: 'validation'` error and keep
+ * the `.result()` never-throws contract.
+ */
 function interpolatePath(
   path: string,
-  params?: Record<string, string>,
+  params: Record<string, string> | undefined,
+  missing: string[],
 ): string {
   if (!params)
     return path;
   return path.replace(/\{([^}]+)\}/g, (_, key: string) => {
     const value = params[key];
     if (value === undefined) {
-      throw new Error(`Missing path parameter: ${key}`);
+      missing.push(key);
+      return '';
     }
     return encodeURIComponent(value);
   });

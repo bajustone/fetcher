@@ -22,6 +22,19 @@ import type {
   StringOptions,
 } from './types.ts';
 
+/**
+ * Float-safe `multipleOf` check. A naive `v % multipleOf !== 0` reports false
+ * negatives in IEEE-754 (e.g. `0.3 % 0.1 === 0.0399…`). Compare the quotient
+ * to its nearest integer within a relative tolerance instead.
+ */
+function isMultipleOf(value: number, multipleOf: number): boolean {
+  if (multipleOf === 0)
+    return value === 0;
+  const quotient = value / multipleOf;
+  const rounded = Math.round(quotient);
+  return Math.abs(quotient - rounded) < 1e-9 * Math.max(1, Math.abs(quotient));
+}
+
 /* @__NO_SIDE_EFFECTS__ */
 export function string(opts: StringOptions = {}): FString {
   const { minLength, maxLength, length, pattern, startsWith, endsWith, includes } = opts;
@@ -81,7 +94,7 @@ export function number(opts: NumberOptions = {}): FNumber {
           return { issues: [{ code: 'too_small', message: 'Too small' }] };
         if (exclusiveMaximum !== undefined && v >= exclusiveMaximum)
           return { issues: [{ code: 'too_large', message: 'Too large' }] };
-        if (multipleOf !== undefined && v % multipleOf !== 0)
+        if (multipleOf !== undefined && !isMultipleOf(v, multipleOf))
           return { issues: [{ code: 'not_a_multiple', message: 'Not a multiple' }] };
         return { value: v };
       },
@@ -113,7 +126,7 @@ export function integer(opts: NumberOptions = {}): FInteger {
           return { issues: [{ code: 'too_small', message: 'Too small' }] };
         if (exclusiveMaximum !== undefined && v >= exclusiveMaximum)
           return { issues: [{ code: 'too_large', message: 'Too large' }] };
-        if (multipleOf !== undefined && v % multipleOf !== 0)
+        if (multipleOf !== undefined && !isMultipleOf(v, multipleOf))
           return { issues: [{ code: 'not_a_multiple', message: 'Not a multiple' }] };
         return { value: v };
       },

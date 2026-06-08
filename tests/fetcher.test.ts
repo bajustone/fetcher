@@ -329,6 +329,26 @@ describe('createFetch', () => {
         throw new Error('expected kind:network error');
       }
     });
+
+    it('returns kind:validation when a path parameter is missing (never throws)', async () => {
+      const f = createFetch({
+        baseUrl: 'https://api.example.com',
+        fetch: mockFetch({ ok: true }),
+      });
+
+      // Params object omits `id` (as a JS/untyped consumer can) — must not
+      // reject. The cast mirrors the type system being bypassed.
+      const response = await f('/users/{id}', { method: 'GET', params: {} as Record<'id', string> });
+      const result = await response.result();
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === 'validation') {
+        expect(result.error.location).toBe('params');
+        expect(result.error.issues[0]?.path).toEqual(['id']);
+      }
+      else {
+        throw new Error('expected kind:validation location:params error');
+      }
+    });
   });
 
   describe('schema validation', () => {

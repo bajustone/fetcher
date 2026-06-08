@@ -7,10 +7,10 @@
 
 import type {
   StandardSchemaV1Issue,
-  StandardSchemaV1PathSegment,
   StandardSchemaV1Result,
 } from '../types.ts';
 import type { FSchema, Infer } from './types.ts';
+import { collectMember, finalizeContainer } from './container.ts';
 
 type SyncValidate<T> = (value: unknown) => StandardSchemaV1Result<T>;
 
@@ -29,17 +29,6 @@ export interface FTuple<T extends readonly FSchema<unknown>[]>
   readonly maxItems: number;
 }
 
-function prependPath(
-  segment: StandardSchemaV1PathSegment,
-  issue: StandardSchemaV1Issue,
-): StandardSchemaV1Issue {
-  return {
-    ...(issue.code !== undefined && { code: issue.code }),
-    message: issue.message,
-    path: issue.path ? [segment, ...issue.path] : [segment],
-  };
-}
-
 /* @__NO_SIDE_EFFECTS__ */
 export function record<V extends FSchema<unknown>>(value: V): FRecord<V> {
   const validate = value['~standard'].validate as SyncValidate<Infer<V>>;
@@ -54,16 +43,11 @@ export function record<V extends FSchema<unknown>>(value: V): FRecord<V> {
           return { issues: [{ code: 'expected_object', message: 'Expected object' }] };
         const obj = v as Record<string, unknown>;
         const issues: StandardSchemaV1Issue[] = [];
+        let out: Record<string, unknown> | null = null;
         for (const key in obj) {
-          const r = validate(obj[key]);
-          if (r.issues) {
-            for (let j = 0; j < r.issues.length; j++)
-              issues.push(prependPath(key, r.issues[j]!));
-          }
+          out = collectMember(out, obj, key, obj[key], validate(obj[key]), issues);
         }
-        return issues.length
-          ? { issues }
-          : { value: v as Record<string, Infer<V>> };
+        return finalizeContainer(out, obj, issues) as StandardSchemaV1Result<Record<string, Infer<V>>>;
       },
     },
   } as FRecord<V>;
@@ -90,16 +74,11 @@ export function tuple<T extends readonly [FSchema<unknown>, ...FSchema<unknown>[
         if (v.length !== length)
           return { issues: [{ code: v.length < length ? 'too_short' : 'too_long', message: v.length < length ? 'Too short' : 'Too long' }] };
         const issues: StandardSchemaV1Issue[] = [];
+        let out: unknown[] | null = null;
         for (let i = 0; i < length; i++) {
-          const r = validators[i]!(v[i]);
-          if (r.issues) {
-            for (let j = 0; j < r.issues.length; j++)
-              issues.push(prependPath(i, r.issues[j]!));
-          }
+          out = collectMember(out, v, i, v[i], validators[i]!(v[i]), issues);
         }
-        return issues.length
-          ? { issues }
-          : { value: v as { [K in keyof T]: T[K] extends FSchema<unknown> ? Infer<T[K]> : never } };
+        return finalizeContainer(out, v, issues) as StandardSchemaV1Result<{ [K in keyof T]: T[K] extends FSchema<unknown> ? Infer<T[K]> : never }>;
       },
     },
   } as FTuple<T>;

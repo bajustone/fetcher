@@ -241,6 +241,44 @@ describe('bearerWithRefresh', () => {
     expect(refreshCalls).toBe(1);
   });
 
+  it('staggered 401s after a refresh settles reuse the fresh token (single refresh)', async () => {
+    let refreshCalls = 0;
+
+    // `getToken` keeps returning the stale token — models an external token
+    // store that hasn't been written back yet, so each request still sends
+    // `old` even after a refresh has produced `new`.
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      middleware: [
+        bearerWithRefresh({
+          getToken: () => 'old',
+          refresh: async () => {
+            refreshCalls++;
+            return 'new';
+          },
+          refreshEndpoint: '/auth/refresh',
+        }),
+      ],
+
+      fetch: async (req) => {
+        const auth = req.headers.get('authorization');
+        if (auth === 'Bearer old')
+          return new Response('expired', { status: 401 });
+        return jsonResponse({ ok: true });
+      },
+    });
+
+    // Sequential: the second request's 401 happens AFTER the first refresh
+    // has fully settled (inFlight cleared). The old dedup-on-settle code
+    // would spawn a second refresh here.
+    const a = await (await f('/a', { method: 'GET' })).result();
+    const b = await (await f('/b', { method: 'GET' })).result();
+
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    expect(refreshCalls).toBe(1);
+  });
+
   it('clones the request body across the refresh-retry', async () => {
     let calls = 0;
     const bodies: string[] = [];

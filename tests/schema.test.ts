@@ -211,6 +211,11 @@ describe('formats', () => {
 
     expect(ok(run(uuid(), '123e4567-e89b-12d3-a456-426614174000'))).toBe('123e4567-e89b-12d3-a456-426614174000');
     expect(issues(run(uuid(), 'not-a-uuid'))[0]!.message).toBe('Pattern mismatch');
+    // UUIDv7 (time-ordered) and the nil UUID must be accepted (issue #9).
+    expect(ok(run(uuid(), '0190d3e2-7b7e-7cab-83e5-9c8b0f6a1d2e'))).toBeTruthy();
+    expect(ok(run(uuid(), '00000000-0000-0000-0000-000000000000'))).toBeTruthy();
+    // Version 0 is still invalid.
+    expect(issues(run(uuid(), '123e4567-e89b-02d3-a456-426614174000'))[0]!.message).toBe('Pattern mismatch');
 
     expect(ok(run(datetime(), '2024-01-02T03:04:05Z'))).toBe('2024-01-02T03:04:05Z');
     expect(issues(run(datetime(), '2024-01-02'))[0]!.message).toBe('Pattern mismatch');
@@ -421,6 +426,10 @@ describe('extended number constraints', () => {
   it('multipleOf', () => {
     expect(ok(run(integer({ multipleOf: 5 }), 10))).toBe(10);
     expect(issues(run(integer({ multipleOf: 5 }), 7))[0]!.code).toBe('not_a_multiple');
+    // Decimal multiples must not trip on IEEE-754 remainder error (issue #9).
+    expect(ok(run(number({ multipleOf: 0.1 }), 0.3))).toBe(0.3);
+    expect(ok(run(number({ multipleOf: 0.01 }), 1.21))).toBe(1.21);
+    expect(issues(run(number({ multipleOf: 0.1 }), 0.35))[0]!.code).toBe('not_a_multiple');
   });
 });
 
@@ -470,6 +479,22 @@ describe('object composition', () => {
     expect(M.required.slice().sort()).toEqual(['a', 'b']);
   });
 
+  it('preserves default_ wrappers through pick/omit/merge (issue #10)', () => {
+    const User = object({
+      id: integer(),
+      theme: default_(enum_(['light', 'dark'] as const), 'light'),
+    });
+    // pick keeps the default applied when the field is missing.
+    const Picked = pick(User, ['theme'] as const);
+    expect(ok(run(Picked, {}))).toEqual({ theme: 'light' });
+    // omit of an unrelated key likewise retains the default.
+    const Omitted = omit(User, ['id'] as const);
+    expect(ok(run(Omitted, {}))).toEqual({ theme: 'light' });
+    // merge carries the default through.
+    const Merged = merge(object({ id: integer() }), pick(User, ['theme'] as const));
+    expect(ok(run(Merged, { id: 1 }))).toEqual({ id: 1, theme: 'light' });
+  });
+
   it('keyof_ produces an enum of keys', () => {
     const K = keyof_(Pet);
     expect(K.enum.slice().sort()).toEqual(['id', 'name', 'tag']);
@@ -492,6 +517,40 @@ describe('record + tuple', () => {
     expect(issues(run(Pair, ['a']))[0]!.code).toBe('too_short');
     expect(issues(run(Pair, ['a', 1, 2]))[0]!.code).toBe('too_long');
     expect(issues(run(Pair, [1, 1]))[0]!.path).toEqual([0]);
+  });
+});
+
+describe('nested transform/default propagation (issue #8)', () => {
+  const upper = transform(string(), s => s.toUpperCase());
+
+  it('array threads transformed member values', () => {
+    expect(ok(run(array(upper), ['x', 'y']))).toEqual(['X', 'Y']);
+  });
+
+  it('array threads defaulted member values', () => {
+    expect(ok(run(array(default_(string(), 'D')), [undefined]))).toEqual(['D']);
+  });
+
+  it('record threads transformed member values', () => {
+    expect(ok(run(record(upper), { k: 'x' }))).toEqual({ k: 'X' });
+  });
+
+  it('tuple threads transformed member values', () => {
+    expect(ok(run(tuple([upper]), ['x']))).toEqual(['X']);
+  });
+
+  it('intersect threads transformed output of earlier members', () => {
+    const I = intersect([
+      object({ a: upper }),
+      object({ a: string() }),
+    ]);
+    expect(ok(run(I, { a: 'x' }))).toEqual({ a: 'X' });
+  });
+
+  it('returns the original reference when nothing changed (no needless clone)', () => {
+    const input = ['x', 'y'];
+    const r = run(array(string()), input);
+    expect(ok(r)).toBe(input);
   });
 });
 

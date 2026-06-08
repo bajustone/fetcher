@@ -181,15 +181,31 @@ export interface BearerWithRefreshOptions<Paths = Record<string, unknown>> {
 export function bearerWithRefresh<Paths = Record<string, unknown>>(opts: BearerWithRefreshOptions<Paths>): Middleware {
   const { getToken, refresh, exclude, refreshEndpoint } = opts;
 
-  // Shared in-flight refresh promise. Concurrent 401s await this same
-  // promise so only one refresh runs at a time. Cleared when refresh
-  // settles (resolved or rejected).
+  // Refresh dedup, generation-based (no wall-clock needed):
+  //
+  //  - `inFlight` shares a single concurrent refresh across truly
+  //    simultaneous 401s.
+  //  - `currentToken` remembers the most recent successfully-refreshed token.
+  //    A 401 whose *stale* token has already been superseded by a newer
+  //    `currentToken` reuses that token instead of triggering another
+  //    refresh. This closes the staggered-burst gap: requests that 401 just
+  //    after the first refresh settled no longer each spawn a fresh refresh.
   let inFlight: Promise<string> | null = null;
-  const sharedRefresh = (): Promise<string> => {
+  let currentToken: string | undefined;
+  const sharedRefresh = (staleToken: string | null | undefined): Promise<string> => {
+    // The refresh already produced a token newer than the one this request
+    // tried — retry with it, don't refresh again.
+    if (currentToken !== undefined && currentToken !== staleToken)
+      return Promise.resolve(currentToken);
     if (!inFlight) {
-      inFlight = refresh().finally(() => {
-        inFlight = null;
-      });
+      inFlight = refresh()
+        .then((token) => {
+          currentToken = token;
+          return token;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
     }
     return inFlight;
   };
@@ -213,8 +229,9 @@ export function bearerWithRefresh<Paths = Record<string, unknown>>(opts: BearerW
       return response;
 
     // 401 — refresh and retry exactly once. Concurrent 401s share the
-    // same in-flight refresh promise.
-    const newToken = await sharedRefresh();
+    // same in-flight refresh promise; staggered 401s within the same expiry
+    // burst reuse the token the first refresh produced.
+    const newToken = await sharedRefresh(initialToken);
     const retryAttempt = request.clone();
     retryAttempt.headers.set('Authorization', `Bearer ${newToken}`);
     return next(retryAttempt);

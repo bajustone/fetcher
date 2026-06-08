@@ -11,7 +11,10 @@ import type { FString } from './types.ts';
 
 const emailRE = /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/;
 const urlRE = /^[a-z][a-z0-9+\-.]*:\/\/\S+$/i;
-const uuidRE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Accepts UUID versions 1–8 (RFC 9562 widened the version space; v7 is now a
+// common default for new IDs) plus the all-zero nil UUID and the all-F max
+// UUID, neither of which carry the standard version/variant nibbles.
+const uuidRE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/i;
 const datetimeRE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const dateRE = /^\d{4}-\d{2}-\d{2}$/;
 const timeRE = /^\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/;

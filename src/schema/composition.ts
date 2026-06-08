@@ -31,8 +31,16 @@ type RequiredProps<T extends FProperties> = {
 
 function rebuildProps(schema: FObject<FProperties>): FProperties {
   const requiredSet = new Set(schema.required);
-  const out: Record<string, FSchema<unknown> | FOptionalWrapper<FSchema<unknown>>> = {};
+  const defaults = schema['~defaults'];
+  const out: Record<string, FProperties[string]> = {};
   for (const key in schema.properties) {
+    // Preserve the original `default_` wrapper — `properties` only holds the
+    // unwrapped inner schema, so without this defaults silently degrade to
+    // plain optionals through composition (issue #10).
+    if (defaults && key in defaults) {
+      out[key] = defaults[key]!;
+      continue;
+    }
     const inner = schema.properties[key]!;
     out[key] = requiredSet.has(key) ? inner : optional(inner);
   }

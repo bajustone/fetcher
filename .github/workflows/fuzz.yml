@@ -1,0 +1,31 @@
+name: Schema fuzz
+
+# The default `bun run test` in ci.yml already runs the differential harness
+# with a fixed seed (deterministic). This workflow runs a deeper, longer fuzz
+# of the schema-vs-Zod parity harness on a schedule and on demand.
+on:
+  schedule:
+    - cron: '0 5 * * *' # nightly, 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Iterations per seed'
+        required: false
+        default: '50000'
+
+jobs:
+  differential-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Deep differential fuzz across several seeds
+        env:
+          FUZZ_ITERATIONS: ${{ github.event.inputs.iterations || '50000' }}
+        run: |
+          for seed in 1 2 3 13 99 12648430; do
+            echo "::group::seed $seed"
+            FUZZ_SEED=$seed bun test tests/schema-differential.test.ts
+            echo "::endgroup::"
+          done

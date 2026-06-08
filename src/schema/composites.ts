@@ -8,7 +8,6 @@
 
 import type {
   StandardSchemaV1Issue,
-  StandardSchemaV1PathSegment,
   StandardSchemaV1Result,
 } from '../types.ts';
 import type {
@@ -27,6 +26,7 @@ import type {
   Infer,
   ObjectOptions,
 } from './types.ts';
+import { collectMember, finalizeContainer } from './container.ts';
 
 type SyncValidate<T> = (value: unknown) => StandardSchemaV1Result<T>;
 
@@ -42,17 +42,6 @@ function isDefault(
   return (entry as FDefaultWrapper<FSchema<unknown>>)['~default'] === true;
 }
 
-function prependPath(
-  segment: StandardSchemaV1PathSegment,
-  issue: StandardSchemaV1Issue,
-): StandardSchemaV1Issue {
-  return {
-    ...(issue.code !== undefined && { code: issue.code }),
-    message: issue.message,
-    path: issue.path ? [segment, ...issue.path] : [segment],
-  };
-}
-
 /* @__NO_SIDE_EFFECTS__ */
 export function object<T extends FProperties>(
   props: T,
@@ -63,11 +52,13 @@ export function object<T extends FProperties>(
   const validators: Array<SyncValidate<unknown>> = [];
   const callIfMissing: boolean[] = [];
   const properties: Record<string, FSchema<unknown>> = {};
+  let defaults: Record<string, FDefaultWrapper<FSchema<unknown>>> | undefined;
 
   for (const key in props) {
     const entry = props[key]!;
     if (isDefault(entry)) {
       properties[key] = entry['~wrapped'];
+      (defaults ??= {})[key] = entry;
       keys.push(key);
       validators.push(entry['~standard'].validate as SyncValidate<unknown>);
       callIfMissing.push(true);
@@ -93,6 +84,7 @@ export function object<T extends FProperties>(
     properties,
     required,
     ...(opts.$id !== undefined && { $id: opts.$id }),
+    ...(defaults !== undefined && { '~defaults': defaults }),
     '~standard': {
       version: 1,
       vendor: 'fetcher',
@@ -112,19 +104,10 @@ export function object<T extends FProperties>(
           const missing = !(k in obj);
           if (!missing || callIfMissing[i]) {
             const r = validators[i]!(obj[k]);
-            if (r.issues) {
-              for (let j = 0; j < r.issues.length; j++)
-                issues.push(prependPath(k, r.issues[j]!));
-            }
-            else if (r.value !== obj[k]) {
-              out ??= { ...obj };
-              out[k] = r.value;
-            }
+            out = collectMember(out, obj, k, obj[k], r, issues);
           }
         }
-        if (issues.length)
-          return { issues };
-        return { value: (out ?? v) as FObjectOutput<T> };
+        return finalizeContainer(out, obj, issues) as StandardSchemaV1Result<FObjectOutput<T>>;
       },
     },
   } as FObject<T>;
@@ -153,14 +136,11 @@ export function array<T extends FSchema<unknown>>(
         if (maxItems !== undefined && v.length > maxItems)
           return { issues: [{ code: 'too_long', message: 'Too long' }] };
         const issues: StandardSchemaV1Issue[] = [];
+        let out: unknown[] | null = null;
         for (let i = 0; i < v.length; i++) {
-          const r = itemValidate(v[i]);
-          if (r.issues) {
-            for (let j = 0; j < r.issues.length; j++)
-              issues.push(prependPath(i, r.issues[j]!));
-          }
+          out = collectMember(out, v, i, v[i], itemValidate(v[i]), issues);
         }
-        return issues.length ? { issues } : { value: v as Infer<T>[] };
+        return finalizeContainer(out, v, issues) as StandardSchemaV1Result<Infer<T>[]>;
       },
     },
   } as FArray<T>;
@@ -244,16 +224,23 @@ export function intersect<T extends readonly [FSchema<unknown>, ...FSchema<unkno
       vendor: 'fetcher',
       validate(v): StandardSchemaV1Result<Intersection<{ [K in keyof T]: Infer<T[K]> }>> {
         const issues: StandardSchemaV1Issue[] = [];
+        let value: unknown = v;
         for (let i = 0; i < validators.length; i++) {
-          const r = validators[i]!(v);
+          const r = validators[i]!(value);
           if (r.issues) {
             for (let j = 0; j < r.issues.length; j++)
               issues.push(r.issues[j]!);
           }
+          else {
+            // Thread each member's output into the next so transforms/defaults
+            // applied by earlier members are visible to later ones and to the
+            // final result.
+            value = r.value;
+          }
         }
         return issues.length
           ? { issues }
-          : { value: v as Intersection<{ [K in keyof T]: Infer<T[K]> }> };
+          : { value: value as Intersection<{ [K in keyof T]: Infer<T[K]> }> };
       },
     },
   } as FIntersect<T>;

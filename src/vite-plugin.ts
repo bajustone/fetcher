@@ -40,7 +40,7 @@
  * @module
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { inline } from './inline.ts';
 import { extractComponentSchemas, extractRouteSchemas } from './openapi.ts';
@@ -63,8 +63,13 @@ export interface FetcherPluginOptions {
   output?: string;
   /**
    * Remote URL to fetch the OpenAPI spec from. If set, the spec is
-   * downloaded and written to the `spec` path before generation.
-   * Falls back to the local file if the fetch fails.
+   * downloaded to a separate cache file (`.fetcher-spec-cache.json` in the
+   * output dir) and generation runs from there — the user's `spec` file is
+   * **never** overwritten, so builds stay reproducible and the working tree
+   * clean. Add the cache file to `.gitignore`.
+   *
+   * On fetch failure, falls back to the cached copy, then to the local
+   * `spec` file, and only errors if neither exists.
    */
   url?: string;
   /**
@@ -96,6 +101,8 @@ const VIRTUAL_INLINED_ID = 'virtual:fetcher/inlined';
 /** Rollup convention: `\0` prefix marks a virtual module. */
 const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_MODULE_ID}`;
 const RESOLVED_INLINED_ID = `\0${VIRTUAL_INLINED_ID}`;
+/** Matches the `components` interface openapi-typescript emits when the spec has components. */
+const COMPONENTS_INTERFACE_RE = /export interface components\b/;
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -124,34 +131,66 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
   const outputDir = resolve(options.output ?? dirname(spec));
   const pathsDtsPath = resolve(outputDir, 'paths.d.ts');
   const envDtsPath = resolve(outputDir, 'fetcher-env.d.ts');
+  // Remote specs are cached here instead of overwriting the user's source
+  // `spec` file (keeps builds reproducible, working tree clean). Gitignore it.
+  const cachePath = resolve(outputDir, '.fetcher-spec-cache.json');
+
+  // Parse the spec at most once per (path, mtime). `load()` fires once per
+  // virtual module and `generate()` needs it too — without this the spec is
+  // read and JSON.parsed 3+ times per build.
+  let specCache: { path: string; mtimeMs: number; parsed: unknown } | null = null;
+  // The path the most recent generate() read from: the cache file for remote
+  // specs, otherwise the user's source spec. `load()` reads the same one.
+  let activeSpecPath = options.url ? cachePath : specPath;
+
+  function readSpec(path: string): unknown {
+    const { mtimeMs } = statSync(path);
+    if (specCache && specCache.path === path && specCache.mtimeMs === mtimeMs)
+      return specCache.parsed;
+    const parsed = JSON.parse(readFileSync(path, 'utf-8'));
+    specCache = { path, mtimeMs, parsed };
+    return parsed;
+  }
 
   async function generate(): Promise<void> {
     mkdirSync(outputDir, { recursive: true });
 
-    // If a remote URL is configured, fetch and cache the spec locally.
+    // If a remote URL is configured, fetch into the cache file — never the
+    // user's source spec. Fall back (cache → local → error) on failure.
     if (options.url) {
       try {
         const response = await globalThis.fetch(options.url);
         if (!response.ok)
           throw new Error(`HTTP ${response.status}`);
         const body = await response.text();
-        JSON.parse(body); // Validate JSON before overwriting
-        writeFileSync(specPath, body);
+        JSON.parse(body); // Validate JSON before caching
+        writeFileSync(cachePath, body);
+        activeSpecPath = cachePath;
       }
       catch (err) {
-        if (existsSync(specPath)) {
-          console.warn(`[fetcher] Failed to fetch spec from ${options.url}, using local file: ${err}`);
+        if (existsSync(cachePath)) {
+          activeSpecPath = cachePath;
+          console.warn(`[fetcher] Failed to fetch spec from ${options.url}, using cached copy at ${cachePath}: ${err}`);
+        }
+        else if (existsSync(specPath)) {
+          activeSpecPath = specPath;
+          console.warn(`[fetcher] Failed to fetch spec from ${options.url}, using local file ${spec}: ${err}`);
         }
         else {
           throw new Error(
-            `[fetcher] Failed to fetch spec from ${options.url} and no local file exists at ${spec}: ${err}`,
+            `[fetcher] Failed to fetch spec from ${options.url} and no cached or local file exists: ${err}`,
           );
         }
       }
     }
+    else {
+      activeSpecPath = specPath;
+    }
 
-    await runOpenAPITypeScript(specPath, pathsDtsPath);
-    appendSchemaHelper(pathsDtsPath);
+    const parsed = readSpec(activeSpecPath);
+    assertOpenAPI(parsed, activeSpecPath);
+    await runOpenAPITypeScript(parsed, pathsDtsPath);
+    appendSchemaHelper(pathsDtsPath, parsed);
 
     // Collect component names so the env declaration can narrow
     // `schemas` / `validators` keys to literal component names (making
@@ -159,8 +198,9 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
     const emitComponents = options.components !== false;
     let componentNames: string[] = [];
     if (emitComponents) {
-      const rawSpec = JSON.parse(readFileSync(specPath, 'utf-8'));
-      componentNames = Object.keys(extractComponentSchemas(rawSpec).schemas);
+      componentNames = Object.keys(
+        extractComponentSchemas(parsed as Parameters<typeof extractComponentSchemas>[0]).schemas,
+      );
     }
     emitEnvDeclaration(envDtsPath, emitComponents, componentNames);
   }
@@ -196,7 +236,7 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
       if (id !== RESOLVED_VIRTUAL_ID && id !== RESOLVED_INLINED_ID)
         return null;
 
-      const rawSpec = JSON.parse(readFileSync(specPath, 'utf-8'));
+      const rawSpec = readSpec(activeSpecPath);
       const emitComponents = options.components !== false;
 
       if (id === RESOLVED_INLINED_ID) {
@@ -212,25 +252,34 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
     // Rollup ignores this hook silently.
     configureServer(server: ViteDevServer) {
       server.watcher.add(specPath);
-      server.watcher.on('change', async (changedPath: string) => {
+      let debounce: ReturnType<typeof setTimeout> | null = null;
+      server.watcher.on('change', (changedPath: string) => {
         if (resolve(changedPath) !== specPath)
           return;
 
-        try {
-          await generate();
-          // Invalidate both virtual modules so Vite serves fresh code.
-          for (const moduleId of [RESOLVED_VIRTUAL_ID, RESOLVED_INLINED_ID]) {
-            const mod = server.moduleGraph.getModuleById(moduleId);
-            if (mod)
-              server.moduleGraph.invalidateModule(mod);
+        // Debounce rapid saves so overlapping generate() calls don't race on
+        // the writeFileSync to paths.d.ts.
+        if (debounce)
+          clearTimeout(debounce);
+        debounce = setTimeout(async () => {
+          // Force a re-parse: the source file changed under us.
+          specCache = null;
+          try {
+            await generate();
+            // Invalidate both virtual modules so Vite serves fresh code.
+            for (const moduleId of [RESOLVED_VIRTUAL_ID, RESOLVED_INLINED_ID]) {
+              const mod = server.moduleGraph.getModuleById(moduleId);
+              if (mod)
+                server.moduleGraph.invalidateModule(mod);
+            }
+            server.ws.send({ type: 'full-reload' });
           }
-          server.ws.send({ type: 'full-reload' });
-        }
-        catch (error) {
-          server.config.logger.error(
-            `[fetcher] Failed to regenerate from ${spec}: ${error}`,
-          );
-        }
+          catch (error) {
+            server.config.logger.error(
+              `[fetcher] Failed to regenerate from ${spec}: ${error}`,
+            );
+          }
+        }, 50);
       });
     },
   };
@@ -343,7 +392,7 @@ function buildInlinedModule(rawSpec: unknown): string {
  * it must be installed in the user's project as a dev dependency. If it's
  * missing, a clear error is thrown.
  */
-async function runOpenAPITypeScript(specPath: string, outputPath: string): Promise<void> {
+async function runOpenAPITypeScript(spec: unknown, outputPath: string): Promise<void> {
   let openapiTS: (schema: unknown) => Promise<string>;
   try {
     const mod = await import('openapi-typescript');
@@ -366,21 +415,46 @@ async function runOpenAPITypeScript(specPath: string, outputPath: string): Promi
     );
   }
 
-  const specContent = JSON.parse(readFileSync(specPath, 'utf-8'));
-  const output = await openapiTS(specContent);
+  const output = await openapiTS(spec);
   writeFileSync(outputPath, output);
+}
+
+/**
+ * Cheap structural guard: confirms the parsed spec is an OpenAPI 3.x
+ * document before handing it to `openapi-typescript`/`extractRouteSchemas`.
+ * A valid-JSON-but-not-OpenAPI file otherwise surfaces as an opaque error
+ * from deep inside those tools; this gives a friendly, actionable message.
+ */
+function assertOpenAPI(spec: unknown, path: string): void {
+  const openapi = (spec as { openapi?: unknown } | null)?.openapi;
+  if (typeof spec !== 'object' || spec === null || typeof openapi !== 'string' || !openapi.startsWith('3.')) {
+    throw new Error(
+      `[fetcher] ${path} is not a valid OpenAPI 3.x document — `
+      + `expected a top-level "openapi" field starting with "3." `
+      + `(found ${openapi === undefined ? 'none' : JSON.stringify(openapi)}).`,
+    );
+  }
 }
 
 /**
  * Appends a pre-applied `Schema<Name>` type alias to the generated
  * `paths.d.ts` so users can write `import type { Schema } from './paths'`
  * instead of importing `SchemaOf` from `@bajustone/fetcher` and `components`
- * from `./paths` separately. Only appended if the generated output contains
- * a `components` interface (i.e. the spec has `components.schemas`).
+ * from `./paths` separately.
+ *
+ * Only appended when the spec has a non-empty `components.schemas` (so the
+ * helper actually resolves to something) AND `openapi-typescript` emitted the
+ * `components` interface it references. The previous `content.includes(
+ * 'components')` heuristic false-positived on any path/description/`$ref`
+ * containing the word and near-always passed even with `schemas: never`.
  */
-function appendSchemaHelper(pathsDtsPath: string): void {
+function appendSchemaHelper(pathsDtsPath: string, spec: unknown): void {
+  const components = (spec as { components?: { schemas?: Record<string, unknown> } } | null)?.components;
+  const schemas = components?.schemas;
+  if (!schemas || Object.keys(schemas).length === 0)
+    return;
   const content = readFileSync(pathsDtsPath, 'utf-8');
-  if (!content.includes('components'))
+  if (!COMPONENTS_INTERFACE_RE.test(content))
     return;
 
   const helper = [

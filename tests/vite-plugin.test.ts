@@ -9,7 +9,7 @@
  * If it's not available, the `buildStart` tests will fail with a clear error.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
@@ -268,5 +268,62 @@ describe('extractRouteSchemas', () => {
     expect(serialized).not.toContain('operationId');
     expect(serialized).not.toContain('A paged array of pets');
     expect(serialized).not.toContain('Pet collection');
+  });
+});
+
+describe('fetcherPlugin remote url (issue #5)', () => {
+  let tmpDir: string;
+  let srcSpec: string;
+  const realFetch = globalThis.fetch;
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-url-'));
+    // A committed source spec the plugin must NOT overwrite.
+    srcSpec = join(tmpDir, 'openapi.json');
+    writeFileSync(srcSpec, '{"committed":"do-not-touch"}');
+  });
+
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('writes the fetched spec to a cache file and leaves the source spec untouched', async () => {
+    const remoteBody = readFileSync(SPEC_PATH, 'utf-8');
+    globalThis.fetch = (async () =>
+      new Response(remoteBody, { status: 200 })) as unknown as typeof fetch;
+
+    const outDir = join(tmpDir, 'out');
+    const plugin = fetcherPlugin({
+      spec: srcSpec,
+      url: 'https://example.com/openapi.json',
+      output: outDir,
+    });
+    await (plugin.buildStart as () => Promise<void>)();
+
+    // Source spec is byte-for-byte unchanged.
+    expect(readFileSync(srcSpec, 'utf-8')).toBe('{"committed":"do-not-touch"}');
+    // Cache file holds the fetched spec and generation succeeded from it.
+    expect(existsSync(join(outDir, '.fetcher-spec-cache.json'))).toBe(true);
+    expect(readFileSync(join(outDir, 'paths.d.ts'), 'utf-8')).toContain('"/pets"');
+  });
+});
+
+describe('fetcherPlugin OpenAPI guard (issue #7)', () => {
+  let tmpDir: string;
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-guard-'));
+  });
+
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('rejects valid JSON that is not an OpenAPI 3.x document', async () => {
+    const badSpec = join(tmpDir, 'not-openapi.json');
+    writeFileSync(badSpec, '{"swagger":"2.0","paths":{}}');
+    const plugin = fetcherPlugin({ spec: badSpec, output: join(tmpDir, 'out') });
+    await expect((plugin.buildStart as () => Promise<void>)()).rejects.toThrow(/not a valid OpenAPI 3\.x/);
   });
 });

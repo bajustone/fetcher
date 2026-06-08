@@ -20,7 +20,7 @@ export type Brand<T, B extends string> = T & { readonly [BRAND]: B };
  *
  * @example
  * ```ts
- * const UserId = brand<'UserId'>(integer());
+ * const UserId = brand<'UserId'>()(integer());
  * type UserId = Infer<typeof UserId>;  // number & { readonly [BRAND]: 'UserId' }
  * ```
  */

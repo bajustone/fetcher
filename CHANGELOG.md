@@ -6,7 +6,9 @@
 - docs: cover cookieAuth + parseSetCookie
 
 ### Fixed
-- fix
+- `object` schemas now propagate a member's transformed value whenever it
+  differs from the input (`r.value !== obj[k]`), not only for defaulted-missing
+  keys — so `transform()` on a present key is no longer dropped.
 
 ## [0.9.0] - 2026-04-24
 
@@ -16,12 +18,15 @@
 ## [0.8.0] - 2026-04-23
 
 ### Fixed
-- fix:
+- Plugin `fetcher-env.d.ts` now references `./paths` via dynamic-import type
+  syntax (`import('./paths').paths`) so the ambient `declare module` resolves
+  relative paths reliably in consumers — fixes `routes`/`validators` collapsing
+  to opaque `never`-typed shapes under SvelteKit and similar frameworks.
 
 ## [0.7.1] - 2026-04-23
 
 ### Added
-- v0.8.0 — friction-list items 1, 2, 5, 6, 7, 10, 13, 14
+- v0.7.1 — friction-list items 1, 2, 5, 6, 7, 10, 13, 14
 
 ## [0.7.0] - 2026-04-18
 

@@ -161,10 +161,18 @@ export interface FArray<T extends FSchema<unknown>> extends FSchema<Infer<T>[]> 
 }
 
 export interface FObject<T extends FProperties> extends FSchema<FObjectOutput<T>> {
-  readonly type: 'object';
-  readonly properties: Record<string, FSchema<unknown>>;
-  readonly required: readonly string[];
-  readonly $id?: string;
+  readonly 'type': 'object';
+  readonly 'properties': Record<string, FSchema<unknown>>;
+  readonly 'required': readonly string[];
+  readonly '$id'?: string;
+  /**
+   * Default-wrapped fields, keyed by property name. `properties` stores the
+   * unwrapped inner schema so emitted JSON Schema stays clean, so the
+   * original {@link default_} wrapper would otherwise be lost. Composition
+   * helpers (`pick`/`omit`/`merge`/…) consult this to carry defaults through.
+   * Internal — never emitted in JSON Schema output.
+   */
+  readonly '~defaults'?: Record<string, FDefaultWrapper<FSchema<unknown>>>;
 }
 
 export interface FUnion<T extends readonly FSchema<unknown>[]>
