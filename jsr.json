@@ -1,6 +1,6 @@
 {
   "name": "@bajustone/fetcher",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
@@ -10,6 +10,11 @@
     "./vite": "./src/vite-plugin.ts"
   },
   "publish": {
-    "include": ["src/**/*.ts", "LICENSE", "README.md", "jsr.json"]
+    "include": [
+      "src/**/*.ts",
+      "LICENSE",
+      "README.md",
+      "jsr.json"
+    ]
   }
 }

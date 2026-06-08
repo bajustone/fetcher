@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.0] - 2026-06-08
+
+### Fixed
+- fix: address open issues across runtime, schema, and vite plugin
+
 ## [0.9.1] - 2026-05-16
 
 ### Added

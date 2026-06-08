@@ -1,6 +1,6 @@
 {
   "name": "@bajustone/fetcher",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Schema-validated, typed fetch client with OpenAPI support",
   "type": "module",
   "module": "src/index.ts",
@@ -12,7 +12,11 @@
     "./vite": "./src/vite-plugin.ts"
   },
   "license": "MIT",
-  "files": ["src", "README.md", "LICENSE"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
