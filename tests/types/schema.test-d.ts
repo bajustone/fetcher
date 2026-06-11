@@ -32,6 +32,7 @@ import {
   ref,
   refined,
   string,
+  transform,
   union,
   unknown,
 } from '../../src/schema/index.ts';
@@ -244,3 +245,44 @@ const S_defVal = default_(array(string()), []);
 const S_defFn = default_(array(string()), () => []);
 export type T_defVal = Verify<Equal<Infer<typeof S_defVal>, string[]>>;
 export type T_defFn = Verify<Equal<Infer<typeof S_defFn>, string[]>>;
+
+// ---------------------------------------------------------------------------
+// Wrapper combinators preserve optional/default markers in the STATIC type
+// (independent-review regression: runtime accepted {} while Infer required
+// the key).
+// ---------------------------------------------------------------------------
+const S_refOpt = object({
+  nick: refined(optional(string()), v => v === undefined || v.length > 2),
+});
+// The key is structurally optional — {} assigns.
+export type T_refinedOptional_assignEmpty = Verify<
+  Equal<Record<string, never> extends Infer<typeof S_refOpt> ? true : false, true>
+>;
+export type T_refinedOptional_value = Verify<
+  Equal<Infer<typeof S_refOpt>['nick'], string | undefined>
+>;
+
+// transform(optional()) keys are optional AND carry the TRANSFORMED type.
+const S_txOpt = object({
+  n: transform(optional(string()), v => (v ?? 'x').length),
+});
+export type T_transformOptional_assignEmpty = Verify<
+  Equal<Record<string, never> extends Infer<typeof S_txOpt> ? true : false, true>
+>;
+export type T_transformOptional_value = Verify<
+  Equal<Infer<typeof S_txOpt>['n'], number | undefined>
+>;
+
+// refined(default_()) keys remain REQUIRED in the output (default fills).
+const S_refDef = object({
+  role: refined(default_(string(), 'member'), v => v.length > 0),
+});
+export type T_refinedDefault_required = Verify<
+  Equal<Record<string, never> extends Infer<typeof S_refDef> ? true : false, false>
+>;
+
+// Plain refined/transform (no wrapper) stay required — no behavior change.
+const S_refPlain = object({ name: refined(string(), v => v.length > 0) });
+export type T_refinedPlain_required = Verify<
+  Equal<Record<string, never> extends Infer<typeof S_refPlain> ? true : false, false>
+>;

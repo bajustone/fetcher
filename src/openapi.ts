@@ -791,10 +791,17 @@ function isNumericParamSchema(
   if (type === 'integer' || type === 'number')
     return true;
   if (Array.isArray(type)) {
-    return (
-      (type.includes('integer') || type.includes('number'))
-      && !type.includes('string')
-    );
+    // A type union admitting 'string' never coerces — a string value is
+    // legitimate there, and coercing it would corrupt valid input.
+    if (type.includes('string'))
+      return false;
+    if (type.includes('integer') || type.includes('number'))
+      return true;
+    // Nullable arrays (type: ['array', 'null']) coerce by their items,
+    // exactly like the plain type === 'array' branch below.
+    if (type.includes('array'))
+      return isNumericParamSchema(resolved.items, definitions, seen);
+    return false;
   }
   if (type === 'array')
     return isNumericParamSchema(resolved.items, definitions, seen);

@@ -70,12 +70,33 @@ export type FProperties = Record<
 /**
  * Splits object properties into required (no wrapper) and optional (wrapped
  * in {@link FOptionalWrapper}), producing the correct TypeScript object type.
+ *
+ * The optional branch reads the entry's OWN output type (not the wrapped
+ * inner schema's): for a plain `optional(string())` the two coincide, but a
+ * wrapper combinator over an optional — `transform(optional(string()), v =>
+ * (v ?? 'x').length)` — outputs a different type than the inner schema, and
+ * the key must reflect it. `undefined` is stripped from the value type
+ * because the `?:` modifier already encodes absence.
  */
 export type FObjectOutput<T extends FProperties>
   = & { [K in keyof T as T[K] extends FOptionalWrapper<FSchema<unknown>> ? K : never]?:
-    T[K] extends FOptionalWrapper<infer S extends FSchema<unknown>> ? Infer<S> : never }
+    T[K] extends FSchema<unknown> ? Exclude<Infer<T[K]>, undefined> : never }
     & { [K in keyof T as T[K] extends FOptionalWrapper<FSchema<unknown>> ? never : K]:
       T[K] extends FSchema<unknown> ? Infer<T[K]> : never };
+
+/**
+ * Return type for the wrapper combinators (`refined`, `transform`) — keeps
+ * an inner `optional()` / `default_()` marker visible in the STATIC type,
+ * matching what `wrapperBase()` propagates at runtime. Without this,
+ * `object()` would treat a `refined(optional(...))` entry as a required key
+ * at the type level while accepting its absence at runtime. `Out` is the
+ * wrapper's own output type (for `transform`, possibly different from the
+ * inner schema's).
+ */
+export type FWrapperResult<S extends FSchema<unknown>, Out>
+  = S extends FOptionalWrapper<FSchema<unknown>> ? FOptionalWrapper<FSchema<Out>>
+    : S extends FDefaultWrapper<FSchema<unknown>> ? FDefaultWrapper<FSchema<Out>>
+      : FSchema<Out>;
 
 // ---------------------------------------------------------------------------
 // Options interfaces — deliberately narrower than JSON Schema itself.

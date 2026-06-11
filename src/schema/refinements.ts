@@ -10,7 +10,7 @@
  */
 
 import type { StandardSchemaV1PathSegment, StandardSchemaV1Result } from '../types.ts';
-import type { FDefaultWrapper, FSchema, Infer } from './types.ts';
+import type { FDefaultWrapper, FSchema, FWrapperResult, Infer } from './types.ts';
 import { ensureSync } from './container.ts';
 import { emissionTarget, schemaMeta, wrapperBase } from './wrap.ts';
 
@@ -61,31 +61,31 @@ export interface RefinedOptions {
  * ```
  */
 /* @__NO_SIDE_EFFECTS__ */
-export function refined<T>(
-  schema: FSchema<T>,
-  predicate: (value: T) => boolean,
+export function refined<S extends FSchema<unknown>>(
+  schema: S,
+  predicate: (value: Infer<S>) => boolean,
   messageOrOptions: string | RefinedOptions = 'Refinement failed',
-): FSchema<T> {
+): FWrapperResult<S, Infer<S>> {
   const opts = typeof messageOrOptions === 'string' ? { message: messageOrOptions } : messageOrOptions;
   const message = opts.message ?? 'Refinement failed';
   const code = opts.code ?? 'refine_failed';
   const path = opts.path;
-  const innerValidate = schema['~standard'].validate as SyncValidate<T>;
+  const innerValidate = schema['~standard'].validate as SyncValidate<Infer<S>>;
   return {
     ...wrapperBase(schema),
     '~standard': {
       version: 1,
       vendor: 'fetcher',
-      validate(v): StandardSchemaV1Result<T> {
+      validate(v): StandardSchemaV1Result<Infer<S>> {
         const r = ensureSync(innerValidate(v));
         if (r.issues)
           return r;
-        if (!predicate(r.value as T))
+        if (!predicate(r.value as Infer<S>))
           return { issues: [{ code, message, ...(path !== undefined && { path }) }] };
         return r;
       },
     },
-  } as FSchema<T>;
+  } as FWrapperResult<S, Infer<S>>;
 }
 
 /**

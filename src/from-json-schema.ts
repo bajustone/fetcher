@@ -93,11 +93,172 @@ function pickArrayOpts(n: RawSchema): { minItems?: number; maxItems?: number } {
   return out;
 }
 
+/** String assertion keywords (apply only to string instances per 2020-12). */
+const STRING_ASSERTIONS = ['minLength', 'maxLength', 'pattern'] as const;
+/**
+ * Numeric assertion keywords (apply only to number instances per 2020-12).
+ * Deliberately matches {@link pickNumberOpts}' enforced subset —
+ * `exclusiveMinimum`/`exclusiveMaximum`/`multipleOf` are unenforced
+ * throughout this bridge (documented drift, flagged by `lintSpec`), so
+ * sibling positions must not enforce more than inline positions do.
+ */
+const NUMBER_ASSERTIONS = ['minimum', 'maximum'] as const;
+/** Array assertion keywords (apply only to array instances per 2020-12). */
+const ARRAY_ASSERTIONS = ['minItems', 'maxItems'] as const;
+
+/** A non-null, non-array object — the 2020-12 "object" instance type. */
+function isObjectInstance(v: unknown): boolean {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Picks the subset of `keys` present on `n`, or null when none are. */
+function pickPresent(n: RawSchema, keys: readonly string[]): RawSchema | null {
+  const out: RawSchema = {};
+  let any = false;
+  for (const key of keys) {
+    if (n[key] !== undefined) {
+      out[key] = n[key];
+      any = true;
+    }
+  }
+  return any ? out : null;
+}
+
+/**
+ * Wraps `inner` so it only runs when `applies(value)` — the 2020-12 rule
+ * that assertion keywords constrain only instances of their own type
+ * (`minLength` on a number passes vacuously). `meta` carries the raw
+ * keywords so the gated schema still serializes faithfully.
+ */
+function gated(
+  applies: (value: unknown) => boolean,
+  inner: FSchema<unknown>,
+  meta: RawSchema,
+): FSchema<unknown> {
+  return {
+    ...meta,
+    '~standard': {
+      version: 1,
+      vendor: 'fetcher',
+      validate: (value: unknown) =>
+        applies(value) ? inner['~standard'].validate(value) : { value },
+    },
+  } as FSchema<unknown>;
+}
+
+/**
+ * Builds a validator for a typeless node that carries only assertion
+ * keywords (the shape produced by `$ref` siblings like
+ * `{ $ref: ..., minLength: 3 }`). Each keyword group is enforced through
+ * the builder's own primitive — so code-point string lengths and the rest
+ * of the builder semantics apply — but gated on the instance type per
+ * 2020-12. Returns null when the node has no enforceable assertions.
+ */
+/**
+ * Converts the keywords adjacent to a `$ref` into the sibling half of the
+ * 2020-12 conjunction. Differs from the general {@link convert} path in one
+ * deliberate way: with no explicit `type`, the object/array applicators
+ * (`properties`/`required`, `items`+bounds) are TYPE-GATED — they constrain
+ * only instances of their own type and pass vacuously otherwise. In sibling
+ * position the instance type comes from the ref target (which may be a
+ * union), so strict intent-typing here would make e.g.
+ * `{ $ref: <string>, items: ... }` an unsatisfiable conjunction that
+ * validates nothing. Standalone typeless schemas keep the strict OpenAPI
+ * "properties/items imply type" idiom via {@link convert}.
+ */
+function convertSiblingConstraints(n: RawSchema): FSchema<unknown> {
+  // An explicit `type`, enum/const, or composition keyword is either
+  // explicitly typed or type-independent — the general converter is
+  // already correct for those.
+  if (
+    n.type !== undefined
+    || Array.isArray(n.oneOf)
+    || Array.isArray(n.anyOf)
+    || Array.isArray(n.allOf)
+    || n.enum !== undefined
+    || n.const !== undefined
+  ) {
+    return convert(n);
+  }
+
+  const gates: FSchema<unknown>[] = [];
+  const rest: RawSchema = { ...n };
+
+  if (n.properties) {
+    const meta = pickPresent(n, ['properties', 'required', 'additionalProperties']) ?? {};
+    gates.push(gated(isObjectInstance, convertObject(n), meta));
+    delete rest.properties;
+    delete rest.required;
+    delete rest.additionalProperties;
+  }
+  if (n.items) {
+    const meta = pickPresent(n, ['items', 'minItems', 'maxItems']) ?? {};
+    gates.push(gated(Array.isArray, array(convert(n.items), pickArrayOpts(n)), meta));
+    delete rest.items;
+    delete rest.minItems;
+    delete rest.maxItems;
+  }
+
+  // Scalar assertions, bare required, and bare array bounds not consumed
+  // by the applicator gates above.
+  const assertions = typelessAssertions(rest);
+  if (assertions)
+    gates.push(assertions);
+
+  if (gates.length === 0)
+    return unknown();
+  if (gates.length === 1)
+    return gates[0]!;
+  return intersect(gates as [FSchema<unknown>, FSchema<unknown>, ...FSchema<unknown>[]]);
+}
+
+function typelessAssertions(n: RawSchema): FSchema<unknown> | null {
+  const gates: FSchema<unknown>[] = [];
+  const stringKeys = pickPresent(n, STRING_ASSERTIONS);
+  if (stringKeys)
+    gates.push(gated(v => typeof v === 'string', string(pickStringOpts(stringKeys)), stringKeys));
+  const numberKeys = pickPresent(n, NUMBER_ASSERTIONS);
+  if (numberKeys)
+    gates.push(gated(v => typeof v === 'number', number(pickNumberOpts(numberKeys)), numberKeys));
+  const arrayKeys = pickPresent(n, ARRAY_ASSERTIONS);
+  if (arrayKeys)
+    gates.push(gated(v => Array.isArray(v), array(unknown(), pickArrayOpts(arrayKeys)), arrayKeys));
+  // `required` without `properties` (the `$ref`-sibling shape) is an
+  // object-gated presence assertion: object instances must carry the keys,
+  // every other instance type passes vacuously per 2020-12. The inner
+  // validator is a presence-only object schema, so missing keys report the
+  // builder's standard `missing` issues with correct paths.
+  if (Array.isArray(n.required) && n.required.length > 0 && !n.properties) {
+    const requiredOnly: RawSchema = { required: n.required };
+    gates.push(gated(isObjectInstance, convertObject(requiredOnly), requiredOnly));
+  }
+  // `additionalProperties: false` without `properties` closes the object
+  // COMPLETELY: per 2020-12 scoping, `additionalProperties` consults only
+  // this schema object's own `properties`/`patternProperties` — never the
+  // ref target's — so with none declared, every key is "additional" and
+  // forbidden. (Authors wanting "the referenced object, closed" need
+  // `unevaluatedProperties`, which stays unsupported and lint-flagged.)
+  // Object-gated: non-object instances pass vacuously. The sub-schema and
+  // `true` forms remain unenforced/no-op as elsewhere.
+  if (n.additionalProperties === false && !n.properties) {
+    const meta: RawSchema = { additionalProperties: false };
+    gates.push(gated(isObjectInstance, object({} as FProperties, { unknownKeys: 'strict' }), meta));
+  }
+  if (gates.length === 0)
+    return null;
+  if (gates.length === 1)
+    return gates[0]!;
+  return intersect(gates as [FSchema<unknown>, FSchema<unknown>, ...FSchema<unknown>[]]);
+}
+
 /**
  * Keywords adjacent to `$ref` that {@link convert} can dispatch on. Used to
  * decide whether a `$ref` node with siblings needs the 2020-12 conjunction
  * treatment (`intersect`) — annotation-only siblings (`description`,
- * `title`, ...) convert to `unknown()` and are skipped.
+ * `title`, ...) convert to `unknown()` and are skipped. Bare assertion
+ * keywords (`minLength`, `minimum`, `maxItems`, ...) ARE significant: they
+ * convert to type-gated validators via {@link typelessAssertions}, so
+ * `{ $ref: '#/$defs/Name', minLength: 3 }` actually enforces the length.
  */
 const SIGNIFICANT_REF_SIBLINGS = [
   'oneOf',
@@ -109,6 +270,10 @@ const SIGNIFICANT_REF_SIBLINGS = [
   'properties',
   'required',
   'items',
+  'additionalProperties',
+  ...STRING_ASSERTIONS,
+  ...NUMBER_ASSERTIONS,
+  ...ARRAY_ASSERTIONS,
 ] as const;
 
 function convert(raw: unknown): FSchema<unknown> {
@@ -123,7 +288,7 @@ function convert(raw: unknown): FSchema<unknown> {
     // by validating the ref target AND the sibling constraints.
     if (SIGNIFICANT_REF_SIBLINGS.some(key => n[key] !== undefined)) {
       const { $ref: _refPath, ...siblings } = n;
-      return intersect([target, convert(siblings)]);
+      return intersect([target, convertSiblingConstraints(siblings)]);
     }
     return target;
   }
@@ -202,10 +367,23 @@ function convert(raw: unknown): FSchema<unknown> {
       return convertObject(n);
   }
 
-  if (n.properties || Array.isArray(n.required))
+  // `properties` implies object intent (the common OpenAPI "type omitted"
+  // idiom) — treated as a real object schema, including any `required`.
+  // Bare `required` WITHOUT `properties` falls through to the type-gated
+  // assertion path below instead, so it passes vacuously on non-objects.
+  if (n.properties)
     return convertObject(n);
+  // Likewise `items` implies array intent — a real array schema, carrying
+  // any adjacent minItems/maxItems bounds. Bare bounds WITHOUT `items`
+  // fall through to the type-gated assertion path.
   if (n.items)
-    return array(convert(n.items));
+    return array(convert(n.items), pickArrayOpts(n));
+
+  // Typeless node carrying only assertion keywords — the shape `$ref`
+  // siblings take. Enforced with per-type gating per 2020-12.
+  const assertions = typelessAssertions(n);
+  if (assertions)
+    return assertions;
 
   return unknown();
 }
@@ -237,7 +415,19 @@ function convertObject(n: RawSchema): FSchema<unknown> {
     const sub = convert(rawProps[key]);
     props[key] = required.has(key) ? sub : optional(sub);
   }
-  return object(props as FProperties);
+  // 2020-12: `required` applies independently of `properties`. A required
+  // key with no property schema (common as a `$ref` sibling —
+  // `{ $ref: ..., required: ['name'] }`) is a presence-only constraint:
+  // the key must exist, its value is unconstrained.
+  for (const key of required) {
+    if (!Object.hasOwn(props, key))
+      props[key] = unknown();
+  }
+  // `additionalProperties: false` is a closed object — enforced via the
+  // builder's strict policy (which also re-emits the keyword). The
+  // sub-schema form remains unenforced (and is flagged by lintSpec);
+  // `true`/absent is the default passthrough.
+  return object(props as FProperties, n.additionalProperties === false ? { unknownKeys: 'strict' } : undefined);
 }
 
 /** Strict decimal/scientific numeric-string shape eligible for coercion. */
