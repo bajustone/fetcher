@@ -408,3 +408,56 @@ describe('adversarial-review regressions (core)', () => {
     expect(cap.request!.headers.get('content-type')).toBeNull();
   });
 });
+
+describe('independent-review regressions: declared query schema always runs', () => {
+  it('an omitted query is validated as {} — required query params fail loudly', async () => {
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      routes: {
+        '/search': {
+          GET: {
+            query: schema((data) => {
+              const q = data as Record<string, unknown>;
+              if (typeof q.q !== 'string')
+                return { issues: [{ message: 'q is required', path: ['q'] }] };
+              return { value: q };
+            }),
+          },
+        },
+      },
+      fetch: captureFetch({}),
+    });
+    const result = await f('/search', { method: 'GET' }).result();
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === 'validation')
+      expect(result.error.location).toBe('query');
+  });
+
+  it('query defaults fire when the query is omitted and land on the URL', async () => {
+    const cap: { request?: Request } = {};
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      routes: {
+        '/list': {
+          GET: { query: schema(data => ({ value: { limit: 20, ...(data as Record<string, unknown>) } })) },
+        },
+      },
+      fetch: captureFetch(cap),
+    });
+    const result = await f('/list', { method: 'GET' }).result();
+    expect(result.ok).toBe(true);
+    expect(new URL(cap.request!.url).searchParams.get('limit')).toBe('20');
+  });
+
+  it('all-optional query schemas still allow omitting the query entirely', async () => {
+    const cap: { request?: Request } = {};
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      routes: { '/items': { GET: { query: schema(data => ({ value: data as Record<string, unknown> })) } } },
+      fetch: captureFetch(cap),
+    });
+    const result = await f('/items', { method: 'GET' }).result();
+    expect(result.ok).toBe(true);
+    expect(new URL(cap.request!.url).search).toBe('');
+  });
+});

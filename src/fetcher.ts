@@ -156,8 +156,12 @@ export function createFetch<
         effectiveParams = r.value as Record<string, string | number>;
     }
 
-    if (!precomputedError && routeDef?.query && query !== undefined) {
-      const r = await routeDef.query['~standard'].validate(query);
+    // Like `body`, a declared `query` schema runs even when the caller
+    // omitted the query (validated as `{}`): required query parameters are
+    // a validation error instead of a silently incomplete request, and
+    // query defaults/transforms fire. All-optional query schemas accept {}.
+    if (!precomputedError && routeDef?.query) {
+      const r = await routeDef.query['~standard'].validate(query ?? {});
       if (r.issues)
         precomputedError = makeValidationError('query', r.issues);
       else

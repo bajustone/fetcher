@@ -35,7 +35,7 @@
  */
 
 import type { StandardSchemaV1Result } from '../types.ts';
-import type { FSchema } from './types.ts';
+import type { FSchema, FWrapperResult, Infer } from './types.ts';
 import { ensureSync } from './container.ts';
 import { wrapperBase } from './wrap.ts';
 
@@ -43,55 +43,55 @@ type SyncValidate<T> = (value: unknown) => StandardSchemaV1Result<T>;
 
 /** Post-validation transform — one reshaping step over the validated value. */
 /* @__NO_SIDE_EFFECTS__ */
-export function transform<T0, T1>(
-  schema: FSchema<T0>,
-  t1: (value: T0) => T1,
-): FSchema<T1>;
+export function transform<S extends FSchema<unknown>, T1>(
+  schema: S,
+  t1: (value: Infer<S>) => T1,
+): FWrapperResult<S, T1>;
 /** Post-validation transform — two reshaping steps, each fed the previous output. */
 /* @__NO_SIDE_EFFECTS__ */
-export function transform<T0, T1, T2>(
-  schema: FSchema<T0>,
-  t1: (value: T0) => T1,
+export function transform<S extends FSchema<unknown>, T1, T2>(
+  schema: S,
+  t1: (value: Infer<S>) => T1,
   t2: (value: T1) => T2,
-): FSchema<T2>;
+): FWrapperResult<S, T2>;
 /** Post-validation transform — three reshaping steps, each fed the previous output. */
 /* @__NO_SIDE_EFFECTS__ */
-export function transform<T0, T1, T2, T3>(
-  schema: FSchema<T0>,
-  t1: (value: T0) => T1,
+export function transform<S extends FSchema<unknown>, T1, T2, T3>(
+  schema: S,
+  t1: (value: Infer<S>) => T1,
   t2: (value: T1) => T2,
   t3: (value: T2) => T3,
-): FSchema<T3>;
+): FWrapperResult<S, T3>;
 /** Post-validation transform — four reshaping steps, each fed the previous output. */
 /* @__NO_SIDE_EFFECTS__ */
-export function transform<T0, T1, T2, T3, T4>(
-  schema: FSchema<T0>,
-  t1: (value: T0) => T1,
+export function transform<S extends FSchema<unknown>, T1, T2, T3, T4>(
+  schema: S,
+  t1: (value: Infer<S>) => T1,
   t2: (value: T1) => T2,
   t3: (value: T2) => T3,
   t4: (value: T3) => T4,
-): FSchema<T4>;
+): FWrapperResult<S, T4>;
 /** Post-validation transform — five reshaping steps, each fed the previous output. */
 /* @__NO_SIDE_EFFECTS__ */
-export function transform<T0, T1, T2, T3, T4, T5>(
-  schema: FSchema<T0>,
-  t1: (value: T0) => T1,
+export function transform<S extends FSchema<unknown>, T1, T2, T3, T4, T5>(
+  schema: S,
+  t1: (value: Infer<S>) => T1,
   t2: (value: T1) => T2,
   t3: (value: T2) => T3,
   t4: (value: T3) => T4,
   t5: (value: T4) => T5,
-): FSchema<T5>;
+): FWrapperResult<S, T5>;
 /** Post-validation transform — six reshaping steps; nest `transform` calls for more. */
 /* @__NO_SIDE_EFFECTS__ */
-export function transform<T0, T1, T2, T3, T4, T5, T6>(
-  schema: FSchema<T0>,
-  t1: (value: T0) => T1,
+export function transform<S extends FSchema<unknown>, T1, T2, T3, T4, T5, T6>(
+  schema: S,
+  t1: (value: Infer<S>) => T1,
   t2: (value: T1) => T2,
   t3: (value: T2) => T3,
   t4: (value: T3) => T4,
   t5: (value: T4) => T5,
   t6: (value: T5) => T6,
-): FSchema<T6>;
+): FWrapperResult<S, T6>;
 
 /**
  * Runs the base schema, then applies the transform functions in sequence to

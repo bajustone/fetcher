@@ -77,6 +77,11 @@ being concatenated onto `baseUrl`.
   a forgotten required body is a `validation` error instead of an empty
   request. Schemas for optional bodies must accept `undefined`
   (`fromOpenAPI` does this automatically for `requestBody.required: false`).
+- A route's declared `query` schema likewise runs even when you omit the
+  query (validated as `{}`): a missing **required** query parameter is a
+  `validation` error instead of a silently incomplete request, and query
+  defaults/transforms fire and land on the URL. All-optional query schemas
+  accept the empty object, so plain `f.get('/list')` calls are unaffected.
 
 ### Response handling
 - `application/problem+json`, `application/vnd.api+json`, and any other
@@ -127,9 +132,46 @@ being concatenated onto `baseUrl`.
   previously lost all runtime validation silently now validate.
 - A `default` response is consistently treated as the error catch-all
   (matching the type layer and `lintSpec`), never as a success schema.
-- Integer/number path and query parameters coerce numeric strings, and the
-  type level accepts `string | number` for template params — typed calls
-  with integer params now succeed.
+- Integer/number path and query parameters coerce numeric strings (only
+  when the round-trip is lossless), and the type level accepts
+  `string | number` for template params — typed calls with integer params
+  now succeed. Coercion covers nullable forms too (`type:
+  ['integer','null']`, `type: ['array','null']` with numeric items); any
+  type union admitting `string` never coerces, since a string value is
+  legitimate there.
+- `additionalProperties: false` is enforced: closed objects reject unknown
+  keys (mapped to the builder's `unknownKeys: 'strict'`). The sub-schema
+  form remains unenforced and lint-flagged.
+- Assertion keywords adjacent to `$ref` (`minLength`, `maxLength`,
+  `pattern`, `minimum`, `maximum`, `minItems`, `maxItems`) are enforced as
+  a 2020-12 conjunction, gated on the instance type. Previously they were
+  silently dropped.
+- `required` applies independently of `properties` (2020-12): a required
+  key with no property schema — typically a `$ref` sibling like
+  `{ $ref: ..., required: ['name'] }` — is enforced as a presence-only
+  constraint, type-gated like the other sibling assertions (object
+  instances must carry the keys; other instance types pass vacuously).
+  Previously such keys were silently lost. Nodes with `properties` or an
+  explicit `type: 'object'` keep strict object semantics.
+- A typeless node with `items` carries its adjacent `minItems`/`maxItems`
+  bounds (previously dropped). Same intent split as objects: `items`
+  present → strict array schema; bare bounds without `items` → type-gated,
+  vacuous on non-arrays.
+- In `$ref`-sibling position specifically, the object/array applicators
+  (`properties`/`required`, `items`+bounds) are type-gated too: the
+  instance type comes from the ref target (which may be a union), so the
+  sibling constrains only instances of its own type and passes vacuously
+  otherwise — `{ $ref: <string>, items: ... }` is no longer an
+  unsatisfiable conjunction. Standalone typeless schemas keep the strict
+  "properties/items imply type" OpenAPI idiom; an explicit `type` in
+  sibling position also stays strict.
+- A bare `additionalProperties: false` (no `properties`, as a `$ref`
+  sibling or standalone) is enforced as an object-gated closed-object
+  assertion. Per 2020-12 scoping it consults only its own schema object΄s
+  `properties` — never the ref target΄s — so it forbids ALL keys,
+  including ones the target declares. Authors wanting "the referenced
+  object, closed" need `unevaluatedProperties`, which remains unsupported
+  and lint-flagged. The `true` and sub-schema forms remain no-op/lint-only.
 
 ### Schema engine
 - `number()`/`integer()` reject `±Infinity` (wire data; JSON can't represent
@@ -143,7 +185,11 @@ being concatenated onto `baseUrl`.
   (previously one opaque "No variant matched").
 - `compile()` reaches refs nested anywhere (defs targets, record values,
   tuple members, wrapped refs); transform/refined/default over `optional()`
-  keep both behaviors inside `object()`.
+  keep both behaviors inside `object()` — at the TYPE level too:
+  `refined(optional(...))` / `transform(optional(...))` entries infer as
+  optional keys (and `transform` carries its transformed output type into
+  the key), matching the runtime. `refined(default_(...))` keys stay
+  required in the output type, since the default fills them.
 - Async schemas nested inside sync combinators throw a `TypeError`
   (previously silently corrupted output).
 - `default_` clones object/array fallbacks per use (or accepts a factory).

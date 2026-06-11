@@ -15,6 +15,7 @@
  * 8. HEAD/OPTIONS operations are extracted (parity with `HttpMethod`).
  */
 
+import type { StandardSchemaV1 } from '../src/types.ts';
 import { describe, expect, it, spyOn } from 'bun:test';
 import { createFetch } from '../src/fetcher.ts';
 import { fromJSONSchema } from '../src/from-json-schema.ts';
@@ -1015,5 +1016,256 @@ describe('numeric coercion losslessness + recursion guards (review follow-up)', 
     expect(omitted.issues).toBeDefined(); // required body still required
     const coerced = await body['~standard'].validate({ n: '42' });
     expect(coerced.issues).toBeDefined(); // bodies never coerce
+  });
+});
+
+describe('independent-review regressions: closed objects and $ref sibling assertions', () => {
+  it('additionalProperties: false rejects unknown keys (and re-emits the keyword)', async () => {
+    const closed = fromJSONSchema({
+      type: 'object',
+      properties: { a: { type: 'string' } },
+      required: ['a'],
+      additionalProperties: false,
+    });
+    const extra = await closed['~standard'].validate({ a: 'x', extra: 1 });
+    expect(extra.issues).toBeDefined();
+    const exact = await closed['~standard'].validate({ a: 'x' });
+    expect(exact.issues).toBeUndefined();
+    expect((closed as unknown as Record<string, unknown>).additionalProperties).toBe(false);
+  });
+
+  it('additionalProperties absent / true stays passthrough', async () => {
+    const open = fromJSONSchema({ type: 'object', properties: { a: { type: 'string' } } });
+    const r = await open['~standard'].validate({ a: 'x', extra: 1 });
+    expect(r.issues).toBeUndefined();
+  });
+
+  it('$ref sibling assertion keywords are enforced as a conjunction', async () => {
+    const defs: Record<string, object> = {
+      Name: { type: 'string' },
+      Count: { type: 'number' },
+      List: { type: 'array', items: { type: 'integer' } },
+    };
+    const name = fromJSONSchema({ $ref: '#/$defs/Name', minLength: 3 }, defs);
+    expect((await name['~standard'].validate('x')).issues).toBeDefined();
+    expect((await name['~standard'].validate('xyz')).issues).toBeUndefined();
+
+    const count = fromJSONSchema({ $ref: '#/$defs/Count', minimum: 10 }, defs);
+    expect((await count['~standard'].validate(5)).issues).toBeDefined();
+    expect((await count['~standard'].validate(15)).issues).toBeUndefined();
+
+    const list = fromJSONSchema({ $ref: '#/$defs/List', maxItems: 2 }, defs);
+    expect((await list['~standard'].validate([1, 2, 3])).issues).toBeDefined();
+    expect((await list['~standard'].validate([1])).issues).toBeUndefined();
+  });
+
+  it('sibling assertions gate on instance type (2020-12 vacuous pass)', async () => {
+    // minLength next to a ref whose target is a number: numbers pass.
+    const s = fromJSONSchema({ $ref: '#/$defs/N', minLength: 3 }, { N: { type: 'number' } });
+    expect((await s['~standard'].validate(5)).issues).toBeUndefined();
+  });
+});
+
+describe('independent-review regression: required as a $ref sibling without local properties', () => {
+  it('enforces presence-only required keys from a $ref sibling', async () => {
+    const s = fromJSONSchema(
+      { $ref: '#/$defs/User', required: ['name'] },
+      { User: { type: 'object', properties: { name: { type: 'string' } } } },
+    );
+    expect((await s['~standard'].validate({})).issues).toBeDefined();
+    expect((await s['~standard'].validate({ name: 'ok' })).issues).toBeUndefined();
+    // The ref target's value constraint still applies through the conjunction.
+    expect((await s['~standard'].validate({ name: 42 })).issues).toBeDefined();
+  });
+
+  it('enforces a pure typeless { required } node (presence-only, value unconstrained)', async () => {
+    const s = fromJSONSchema({ required: ['name'] });
+    expect((await s['~standard'].validate({})).issues).toBeDefined();
+    expect((await s['~standard'].validate({ name: 1 })).issues).toBeUndefined();
+    // Presence-only keys re-emit into the serialized schema's `required`.
+    expect((s as unknown as Record<string, unknown>).required).toEqual(['name']);
+  });
+
+  it('a bare required assertion is object-gated — non-objects pass vacuously (2020-12)', async () => {
+    // Standalone typeless node: a number is not an object, required is vacuous.
+    const pure = fromJSONSchema({ required: ['name'] });
+    expect((await pure['~standard'].validate(42)).issues).toBeUndefined();
+    // As a $ref sibling whose target is a string: the conjunction passes —
+    // mirroring how minLength/minimum sibling gates behave.
+    const sibling = fromJSONSchema(
+      { $ref: '#/$defs/Name', required: ['x'] },
+      { Name: { type: 'string' } },
+    );
+    expect((await sibling['~standard'].validate('abc')).issues).toBeUndefined();
+    // But an explicit `type: 'object'` still rejects non-objects outright.
+    const explicit = fromJSONSchema({ type: 'object', required: ['b'] });
+    expect((await explicit['~standard'].validate(42)).issues).toBeDefined();
+    expect((await explicit['~standard'].validate({})).issues).toBeDefined();
+  });
+
+  it('required keys without matching properties enforce alongside declared ones', async () => {
+    const s = fromJSONSchema({
+      type: 'object',
+      properties: { a: { type: 'string' } },
+      required: ['a', 'b'],
+    });
+    expect((await s['~standard'].validate({ a: 'x' })).issues).toBeDefined();
+    expect((await s['~standard'].validate({ a: 'x', b: [1] })).issues).toBeUndefined();
+  });
+});
+
+describe('independent-review regression: typeless items carries adjacent array bounds', () => {
+  it('a $ref sibling with items + maxItems enforces both', async () => {
+    const s = fromJSONSchema(
+      { $ref: '#/$defs/List', items: { type: 'integer' }, maxItems: 2 },
+      { List: { type: 'array' } },
+    );
+    expect((await s['~standard'].validate([1, 2, 3])).issues).toBeDefined();
+    expect((await s['~standard'].validate([1, 2])).issues).toBeUndefined();
+    expect((await s['~standard'].validate(['x'])).issues).toBeDefined();
+  });
+
+  it('a pure typeless { items, minItems, maxItems } node enforces the bounds', async () => {
+    const s = fromJSONSchema({ items: { type: 'integer' }, minItems: 2, maxItems: 3 });
+    expect((await s['~standard'].validate([1])).issues).toBeDefined();
+    expect((await s['~standard'].validate([1, 2, 3])).issues).toBeUndefined();
+    expect((await s['~standard'].validate([1, 2, 3, 4])).issues).toBeDefined();
+  });
+
+  it('bare bounds without items stay type-gated (vacuous on non-arrays)', async () => {
+    const s = fromJSONSchema({ maxItems: 2 });
+    expect((await s['~standard'].validate('abc')).issues).toBeUndefined();
+    expect((await s['~standard'].validate([1, 2, 3])).issues).toBeDefined();
+  });
+});
+
+describe('independent-review regression: object/array applicator siblings are type-gated', () => {
+  const defs: Record<string, object> = {
+    Name: { type: 'string' },
+    List: { type: 'array' },
+    StrOrObj: { anyOf: [{ type: 'string' }, { type: 'object' }] },
+  };
+
+  it('items/properties siblings pass vacuously when the ref target is not their type', async () => {
+    const items = fromJSONSchema({ $ref: '#/$defs/Name', items: { type: 'integer' } }, defs);
+    expect((await items['~standard'].validate('abc')).issues).toBeUndefined();
+    const props = fromJSONSchema({ $ref: '#/$defs/Name', properties: { a: { type: 'string' } } }, defs);
+    expect((await props['~standard'].validate('abc')).issues).toBeUndefined();
+  });
+
+  it('union targets: the sibling constrains only the matching variant', async () => {
+    const s = fromJSONSchema(
+      { $ref: '#/$defs/StrOrObj', properties: { n: { type: 'integer' } }, required: ['n'] },
+      defs,
+    );
+    expect((await s['~standard'].validate('hello')).issues).toBeUndefined();
+    expect((await s['~standard'].validate({ n: 1 })).issues).toBeUndefined();
+    expect((await s['~standard'].validate({})).issues).toBeDefined();
+    expect((await s['~standard'].validate({ n: 'x' })).issues).toBeDefined();
+  });
+
+  it('gated siblings still enforce on matching instances; explicit type siblings stay strict', async () => {
+    const bounds = fromJSONSchema({ $ref: '#/$defs/List', items: { type: 'integer' }, maxItems: 2 }, defs);
+    expect((await bounds['~standard'].validate([1, 2, 3])).issues).toBeDefined();
+    const typed = fromJSONSchema({ $ref: '#/$defs/Name', type: 'string', minLength: 3 }, defs);
+    expect((await typed['~standard'].validate(42)).issues).toBeDefined();
+  });
+
+  it('standalone typeless schemas keep strict object/array intent (sibling gating does not leak)', async () => {
+    const obj = fromJSONSchema({ properties: { a: { type: 'string' } }, required: ['a'] });
+    expect((await obj['~standard'].validate('abc')).issues).toBeDefined();
+    const arr = fromJSONSchema({ items: { type: 'integer' }, maxItems: 2 });
+    expect((await arr['~standard'].validate('abc')).issues).toBeDefined();
+  });
+});
+
+describe('independent-review regression: bare additionalProperties: false as a $ref sibling', () => {
+  const defs: Record<string, object> = {
+    Obj: { type: 'object' },
+    Name: { type: 'string' },
+    User: { type: 'object', properties: { name: { type: 'string' } } },
+  };
+
+  it('closes the object completely (2020-12: no sibling properties → every key is additional)', async () => {
+    const s = fromJSONSchema({ $ref: '#/$defs/Obj', additionalProperties: false }, defs);
+    expect((await s['~standard'].validate({ extra: 1 })).issues).toBeDefined();
+    expect((await s['~standard'].validate({})).issues).toBeUndefined();
+  });
+
+  it('does NOT see the ref target΄s properties (per-schema scoping; unevaluatedProperties is the cross-ref tool)', async () => {
+    const s = fromJSONSchema({ $ref: '#/$defs/User', additionalProperties: false }, defs);
+    // Even User΄s own declared `name` is "additional" in the sibling΄s scope.
+    expect((await s['~standard'].validate({ name: 'x' })).issues).toBeDefined();
+  });
+
+  it('is object-gated (vacuous on non-objects) and inert in true/sub-schema forms', async () => {
+    const gatedSibling = fromJSONSchema({ $ref: '#/$defs/Name', additionalProperties: false }, defs);
+    expect((await gatedSibling['~standard'].validate('abc')).issues).toBeUndefined();
+    const truthy = fromJSONSchema({ $ref: '#/$defs/Obj', additionalProperties: true }, defs);
+    expect((await truthy['~standard'].validate({ x: 1 })).issues).toBeUndefined();
+    const subSchema = fromJSONSchema({ $ref: '#/$defs/Obj', additionalProperties: { type: 'string' } }, defs);
+    expect((await subSchema['~standard'].validate({ x: 1 })).issues).toBeUndefined();
+  });
+
+  it('with sibling properties, declared keys pass and others are closed (existing behavior intact)', async () => {
+    const s = fromJSONSchema({ $ref: '#/$defs/Obj', properties: { a: { type: 'string' } }, additionalProperties: false }, defs);
+    expect((await s['~standard'].validate({ a: 'x' })).issues).toBeUndefined();
+    expect((await s['~standard'].validate({ a: 'x', b: 1 })).issues).toBeDefined();
+  });
+
+  it('standalone typeless { additionalProperties: false } enforces with the same gate', async () => {
+    const s = fromJSONSchema({ additionalProperties: false });
+    expect((await s['~standard'].validate({ extra: 1 })).issues).toBeDefined();
+    expect((await s['~standard'].validate('abc')).issues).toBeUndefined();
+  });
+});
+
+describe('independent-review regression: nullable array params coerce numeric strings', () => {
+  const mk = (schema: object): StandardSchemaV1<unknown, unknown> => {
+    const spec: any = {
+      openapi: '3.1.0',
+      paths: {
+        '/x': {
+          get: {
+            parameters: [{ name: 'v', in: 'query', required: true, schema }],
+            responses: { 200: { description: 'ok' } },
+          },
+        },
+      },
+    };
+    return fromOpenAPI(spec)['/x']!.GET!.query!;
+  };
+
+  it('type: [array, null] coerces items like a plain array, and null still passes', async () => {
+    const q = mk({ type: ['array', 'null'], items: { type: 'integer' } });
+    const r = await q['~standard'].validate({ v: ['1', '2'] });
+    expect(r.issues).toBeUndefined();
+    expect(r.value).toEqual({ v: [1, 2] });
+    expect((await q['~standard'].validate({ v: null })).issues).toBeUndefined();
+  });
+
+  it('a union admitting string never coerces (guard preserved)', async () => {
+    const q = mk({ type: ['array', 'string'], items: { type: 'integer' } });
+    const r = await q['~standard'].validate({ v: '7' });
+    expect(r.issues).toBeUndefined();
+    expect((r.value as { v: unknown }).v).toBe('7');
+  });
+
+  it('a self-referential nullable array param neither hangs nor overflows', () => {
+    const spec = {
+      openapi: '3.1.0',
+      components: { schemas: { Nest: { type: ['array', 'null'], items: { $ref: '#/components/schemas/Nest' } } } },
+      paths: {
+        '/x': {
+          get: {
+            parameters: [{ name: 'v', in: 'query', required: true, schema: { $ref: '#/components/schemas/Nest' } }],
+            responses: { 200: { description: 'ok' } },
+          },
+        },
+      },
+    };
+    const start = performance.now();
+    expect(fromOpenAPI(spec as any)['/x']!.GET).toBeDefined();
+    expect(performance.now() - start).toBeLessThan(2_000);
   });
 });

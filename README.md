@@ -398,7 +398,7 @@ if (result.ok) {
 
 Any Standard Schema V1 schema works — the bundled `@bajustone/fetcher/schema` builder shown above, Zod 3.24+, Valibot, ArkType, or any value with a `~standard.validate` property. See [Native schema builder](#native-schema-builder) below for the full builder surface.
 
-A route's declared `body` schema runs **even when you omit the body** — a forgotten required body is a `validation` error, not a silent empty request. Schemas for optional bodies must accept `undefined` (`fromOpenAPI` does this automatically when the spec says `requestBody.required: false`).
+A route's declared `body` schema runs **even when you omit the body** — a forgotten required body is a `validation` error, not a silent empty request. Schemas for optional bodies must accept `undefined` (`fromOpenAPI` does this automatically when the spec says `requestBody.required: false`). The same rule applies to a declared `query` schema: an omitted query is validated as `{}`, so required query parameters fail loudly and query defaults land on the URL, while all-optional query schemas pass untouched.
 
 ### 3. Ad-hoc per-call schema
 
