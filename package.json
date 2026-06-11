@@ -1,6 +1,6 @@
 {
   "name": "@bajustone/fetcher",
-  "version": "0.10.0",
+  "version": "1.0.0",
   "description": "Schema-validated, typed fetch client with OpenAPI support. Standard Schema V1, zero dependencies, runs on Node, Bun, Deno, browsers, and edge workers.",
   "type": "module",
   "license": "MIT",

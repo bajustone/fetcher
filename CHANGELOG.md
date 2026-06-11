@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-06-11
 
 Hardening release. The API surface is the one you know; a pre-release audit
 drove deliberate behavior corrections across the request/response data plane.
