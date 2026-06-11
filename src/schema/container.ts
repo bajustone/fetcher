@@ -33,6 +33,49 @@ export function prependPath(
 }
 
 /**
+ * Guards a member validation result against async (Promise-returning)
+ * Standard Schema validators. Every builder combinator is synchronous; a
+ * nested async member (e.g. a Zod schema with an async refinement) would
+ * otherwise be read as `{ value: undefined }` and silently corrupt output.
+ *
+ * Mirrors the Standard Schema spec's recommended sync-consumer pattern.
+ *
+ * @throws TypeError when the result is a Promise.
+ */
+export function ensureSync<T>(
+  r: StandardSchemaV1Result<T> | Promise<StandardSchemaV1Result<T>>,
+): StandardSchemaV1Result<T> {
+  if (r instanceof Promise)
+    throw new TypeError('Schema validation must be synchronous');
+  return r;
+}
+
+/**
+ * Writes `value` to `target[key]` without ever invoking the
+ * `Object.prototype.__proto__` setter — a key literally named `'__proto__'`
+ * (legal in JSON, where it is a plain own property) is installed via
+ * `Object.defineProperty` so container output building can never pollute
+ * prototypes.
+ */
+export function safeSet(
+  target: Record<string | number, unknown>,
+  key: string | number,
+  value: unknown,
+): void {
+  if (key === '__proto__') {
+    Object.defineProperty(target, '__proto__', {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  else {
+    target[key] = value;
+  }
+}
+
+/**
  * Threads one member's validation result into a container accumulator:
  *
  * - on issues → prepend `segment` to each and push onto `issues`;
@@ -60,7 +103,7 @@ export function collectMember<C extends unknown[] | Record<string, unknown>>(
   if (r.value !== input) {
     if (out === null)
       out = (Array.isArray(base) ? [...base] : { ...base }) as C;
-    (out as Record<string | number, unknown>)[segment] = r.value;
+    safeSet(out as Record<string | number, unknown>, segment, r.value);
   }
   return out;
 }

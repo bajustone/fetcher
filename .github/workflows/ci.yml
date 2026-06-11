@@ -6,14 +6,70 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
       - uses: oven-sh/setup-bun@v2
       - run: bun install
       - run: bun run lint
       - run: bun run typecheck
       - run: bun run test
+
+  # Build the npm dist and validate the package manifest + type resolution
+  # (publint + arethetypeswrong run via postbuild).
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun run build
+      - run: bun scripts/check-size.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 1
+
+  # The README claims Node/Bun/Deno/edge support — prove it on every push.
+  # Each leg runs the same conformance smoke against the built dist.
+  node-smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['20.19.0', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: node scripts/smoke.mjs
+
+  deno-smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: denoland/setup-deno@v2
+      - run: deno run -A scripts/smoke.mjs
+
+  bun-smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: oven-sh/setup-bun@v2
+      - run: bun scripts/smoke.mjs
 
   jsr-check:
     runs-on: ubuntu-latest

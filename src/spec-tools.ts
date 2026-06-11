@@ -19,6 +19,15 @@
  * with extra fields satisfy the input. Internal walking is defensive about
  * missing/extra fields. Zero runtime dependencies.
  *
+ * Operations are walked the way the runtime adapter (`fromOpenAPI` in
+ * src/openapi.ts) consumes them: operation-level `$ref`s
+ * (`requestBody` / responses / parameters pointing into `#/components/...`)
+ * are resolved first (cyclic chains throw, like the runtime), path-item-level
+ * `parameters` are merged into every operation (operation wins on
+ * `name`+`in`), and JSON media types are matched structurally — exact
+ * `application/json`, then `application/*+json`, then the `*\/*` wildcard,
+ * with content-type parameters stripped.
+ *
  * @module
  */
 
@@ -60,8 +69,11 @@ export interface IntegrityIssue {
    * `discriminator_duplicate` — two variants share the same tag;
    * `required_without_property` — an `object` schema lists a key in
    * `required` that isn't in `properties`; `unreachable_response` — a
-   * response declares `content` but no `application/json` or wildcard
-   * (`*` `/` `*`) media type (fetcher's default extractors only match those two).
+   * response declares `content` but no JSON-consumable media type: exact
+   * `application/json`, structured-suffix `application/*+json`
+   * (`problem+json`, `vnd.api+json`, ...), or the `*` `/` `*` wildcard,
+   * with content-type parameters stripped (the same matching the runtime
+   * adapter's extractors use).
    */
   kind:
     | 'discriminator_mismatch'
@@ -76,7 +88,9 @@ export interface IntegrityIssue {
 
 /** Per-route Tier 0 type-level inference readiness. See {@link coverage}. */
 export interface RouteCoverage {
+  /** The route's path template exactly as it appears in the spec (e.g. `/pets/{petId}`). */
   path: string;
+  /** Uppercase HTTP method of the operation (e.g. `GET`). */
   method: string;
   /**
    * True when `JSONSchemaToType` can produce a typed body, OR when the
@@ -102,7 +116,9 @@ export interface RouteCoverage {
   fallbackReasons: string[];
   /**
    * Runtime-unsupported keywords this route uses transitively (via `$ref`).
-   * Deduped across body / response / error slots. Keywords here are
+   * Deduped across body / response / error slots and parameter schemas
+   * (path-item-level parameters included, since the runtime builds
+   * params/query validators from them). Keywords here are
    * accepted-but-unenforced at runtime — the spec declares a constraint
    * the validator silently ignores.
    */
@@ -116,7 +132,9 @@ export interface RouteCoverage {
 
 /** Aggregate report from {@link coverage}. */
 export interface SpecCoverageReport {
+  /** One {@link RouteCoverage} entry per path × method in the spec. */
   routes: RouteCoverage[];
+  /** Spec-wide rollup of the per-route results. */
   summary: {
     /** Total routes (path × declared method). */
     total: number;
@@ -136,13 +154,20 @@ export interface SpecCoverageReport {
 // ---------------------------------------------------------------------------
 
 /**
- * Keywords the runtime `JSONSchemaValidator` does NOT enforce. Mirrors the
- * "Not supported (intentionally)" table in `docs/architecture.md`.
+ * Keywords the runtime `JSONSchemaValidator` does NOT enforce. Superset of
+ * the "Not exposed (intentionally)" table in `docs/architecture.md`: it also
+ * covers every remaining JSON Schema 2020-12 validation/applicator keyword
+ * the converter silently ignores (the converter consumes only
+ * `minLength`/`maxLength`/`pattern`, `minimum`/`maximum`,
+ * `minItems`/`maxItems`, plus the structural keywords — see
+ * `from-json-schema.ts`). The differential test in `tests/spec-tools.test.ts`
+ * walks the full 2020-12 keyword set and asserts each keyword is either
+ * enforced or flagged here, so the table can't silently fall behind.
  *
  * The presence of any of these keys in a schema node produces a
  * {@link SpecDriftIssue}. Two special-case keywords (`additionalProperties`
  * with a sub-schema value; `items` with an array value) are handled inline
- * in {@link walkSchema}.
+ * in {@link walkForLint}.
  */
 /**
  * Formats that have a matching builder helper in `@bajustone/fetcher/schema`.
@@ -211,6 +236,66 @@ const UNSUPPORTED_KEYWORDS: Record<string, { severity: 'warn' | 'info'; message:
     severity: 'warn',
     message: 'additionalItems is not enforced at runtime (paired with positional `items`).',
   },
+  not: {
+    severity: 'warn',
+    message: 'not is not enforced at runtime — values matching the negated schema are accepted.',
+  },
+  uniqueItems: {
+    severity: 'warn',
+    message: 'uniqueItems is not enforced at runtime — duplicate array items are accepted.',
+  },
+  minProperties: {
+    severity: 'warn',
+    message: 'minProperties is not enforced at runtime — objects with fewer properties are accepted.',
+  },
+  maxProperties: {
+    severity: 'warn',
+    message: 'maxProperties is not enforced at runtime — objects with more properties are accepted.',
+  },
+  contains: {
+    severity: 'warn',
+    message: 'contains is not enforced at runtime — arrays are not checked for a matching element.',
+  },
+  minContains: {
+    severity: 'info',
+    message: 'minContains is not enforced at runtime (paired with contains).',
+  },
+  maxContains: {
+    severity: 'info',
+    message: 'maxContains is not enforced at runtime (paired with contains).',
+  },
+  unevaluatedProperties: {
+    severity: 'warn',
+    message: 'unevaluatedProperties is not enforced at runtime — leftover properties are accepted unconstrained.',
+  },
+  unevaluatedItems: {
+    severity: 'warn',
+    message: 'unevaluatedItems is not enforced at runtime — leftover array items are accepted unconstrained.',
+  },
+  contentMediaType: {
+    severity: 'info',
+    message: 'contentMediaType is an annotation — string contents are not validated at runtime.',
+  },
+  contentEncoding: {
+    severity: 'info',
+    message: 'contentEncoding is an annotation — string encoding is not validated at runtime.',
+  },
+  contentSchema: {
+    severity: 'info',
+    message: 'contentSchema is an annotation — embedded-document contents are not validated at runtime.',
+  },
+  $dynamicRef: {
+    severity: 'warn',
+    message: '$dynamicRef is not resolved at runtime — the node validates as unknown (accepts anything).',
+  },
+  $anchor: {
+    severity: 'info',
+    message: '$anchor is accepted but unused — only intra-spec $ref pointers are supported, not anchor-based refs.',
+  },
+  $dynamicAnchor: {
+    severity: 'info',
+    message: '$dynamicAnchor is accepted but unused — only intra-spec $ref pointers are supported.',
+  },
   $id: {
     severity: 'info',
     message: '$id is accepted but unused — only intra-spec $ref is supported.',
@@ -278,8 +363,22 @@ const RUNTIME_UNSUPPORTED_KEYWORDS: ReadonlyArray<string> = [
   'dependentRequired',
   'prefixItems',
   'additionalItems',
+  'not',
+  'uniqueItems',
+  'minProperties',
+  'maxProperties',
+  'contains',
+  'minContains',
+  'maxContains',
+  'unevaluatedProperties',
+  'unevaluatedItems',
+  '$dynamicRef',
 ];
 
+// Mirrors the runtime adapter's method set (HTTP_METHODS in src/openapi.ts
+// and the HttpMethod type) — deliberately no 'trace': fromOpenAPI never
+// builds TRACE routes and the type layer never infers them, so walking trace
+// operations here would lint/report schemas the runtime never compiles.
 const HTTP_METHODS = new Set([
   'get',
   'post',
@@ -288,7 +387,6 @@ const HTTP_METHODS = new Set([
   'patch',
   'options',
   'head',
-  'trace',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -299,6 +397,17 @@ const HTTP_METHODS = new Set([
  * Walks an OpenAPI 3.x spec and returns every keyword usage the runtime
  * `JSONSchemaValidator` does NOT enforce. Use as a CI gate to surface
  * type-vs-runtime divergence before it reaches production.
+ *
+ * Operations are normalized the way `fromOpenAPI` consumes them:
+ * operation-level `$ref`s are resolved (issues found inside a referenced
+ * component are reported at the component's pointer, e.g.
+ * `#/components/requestBodies/NewPet/...`), and path-item-level
+ * `parameters` are merged into every operation — a path-item parameter
+ * shadowed by an operation-level one (same `name`+`in`) is not walked,
+ * because the runtime never builds a validator from it.
+ *
+ * @throws Error when the spec contains a cyclic operation-level `$ref`
+ * (mirrors `fromOpenAPI` — a cyclic ref is a malformed spec).
  *
  * @example
  * ```typescript
@@ -331,28 +440,38 @@ export function lintSpec(spec: unknown): SpecDriftIssue[] {
     }
   }
 
-  // Walk every operation's body / response / parameter schemas. Reused
-  // schemas referenced by $ref will be walked again here, which produces
-  // duplicate issues for the same source location — that's intentional:
-  // the duplication makes the offending route easy to spot in CI output.
+  // Walk every operation's body / response / parameter schemas, normalized
+  // the way the runtime consumes them (operation-level $refs resolved,
+  // path-item parameters merged). Reused schemas referenced by $ref will be
+  // walked again here, which produces duplicate issues for the same source
+  // location — that's intentional: the duplication makes the offending
+  // route easy to spot in CI output.
   const paths = (spec as Record<string, unknown>).paths;
   if (paths && typeof paths === 'object') {
     for (const [path, pathItem] of Object.entries(paths)) {
       if (!pathItem || typeof pathItem !== 'object')
         continue;
-      const escapedPath = escapePointer(path);
+      const pathPointer = `#/paths/${escapePointer(path)}`;
+      const pathItemParameters = (pathItem as Record<string, unknown>).parameters;
 
       for (const [method, operation] of Object.entries(pathItem as Record<string, unknown>)) {
         if (!HTTP_METHODS.has(method))
           continue;
         if (!operation || typeof operation !== 'object')
           continue;
-        const op = operation as Record<string, unknown>;
-        const opPointer = `#/paths/${escapedPath}/${method}`;
+        const opPointer = `${pathPointer}/${method}`;
+        const op = normalizeOperation(
+          spec,
+          operation as Record<string, unknown>,
+          pathItemParameters,
+          opPointer,
+          pathPointer,
+        );
 
-        walkRequestBodyForLint(op.requestBody, `${opPointer}/requestBody`, driftIssues);
-        walkResponsesForLint(op.responses, `${opPointer}/responses`, driftIssues);
-        walkParametersForLint(op.parameters, `${opPointer}/parameters`, driftIssues);
+        if (op.requestBody)
+          walkRequestBodyForLint(op.requestBody.node, op.requestBody.pointer, driftIssues);
+        walkResponsesForLint(op.responses, driftIssues);
+        walkParametersForLint(op.parameters, driftIssues);
       }
     }
   }
@@ -381,6 +500,16 @@ export function lintSpec(spec: unknown): SpecDriftIssue[] {
  * workflow with `openapi-typescript`. `coverage()` is kept because it's
  * still useful as a spec-feature pre-flight check, and because it would
  * become directly load-bearing if TypeScript ever ships #32063.
+ *
+ * Operations are normalized the way `fromOpenAPI` consumes them:
+ * operation-level `$ref`s are resolved, path-item-level `parameters` are
+ * merged (operation wins on `name`+`in`), and JSON media types are matched
+ * structurally — exact `application/json`, then `application/*+json`, then
+ * `*\/*`, with content-type parameters stripped — so the report describes
+ * what the runtime actually validates.
+ *
+ * @throws Error when the spec contains a cyclic operation-level `$ref`
+ * (mirrors `fromOpenAPI` — a cyclic ref is a malformed spec).
  *
  * @example
  * ```typescript
@@ -411,17 +540,24 @@ export function coverage(spec: unknown): SpecCoverageReport {
     for (const [path, pathItem] of Object.entries(paths)) {
       if (!pathItem || typeof pathItem !== 'object')
         continue;
-      const escapedPath = escapePointer(path);
+      const pathPointer = `#/paths/${escapePointer(path)}`;
+      const pathItemParameters = (pathItem as Record<string, unknown>).parameters;
 
       for (const [method, operation] of Object.entries(pathItem as Record<string, unknown>)) {
         if (!HTTP_METHODS.has(method))
           continue;
         if (!operation || typeof operation !== 'object')
           continue;
-        const op = operation as Record<string, unknown>;
-        const opPointer = `#/paths/${escapedPath}/${method}`;
+        const opPointer = `${pathPointer}/${method}`;
+        const op = normalizeOperation(
+          spec,
+          operation as Record<string, unknown>,
+          pathItemParameters,
+          opPointer,
+          pathPointer,
+        );
 
-        const bodySlot = walkBodySlot(spec, op.requestBody);
+        const bodySlot = walkBodySlot(spec, op.requestBody?.node);
         const responseSlot = walkResponseSlot(spec, op.responses, 'response', isSuccessStatus);
         const errorSlot = walkResponseSlot(spec, op.responses, 'error', isErrorStatus);
 
@@ -432,12 +568,12 @@ export function coverage(spec: unknown): SpecCoverageReport {
         ];
 
         const unsupportedSet = new Set<string>();
-        collectUnsupported(spec, op.requestBody, unsupportedSet);
-        collectUnsupportedFromResponses(spec, op.responses, unsupportedSet);
+        collectUnsupported(spec, op, unsupportedSet);
 
         const integrityIssues: IntegrityIssue[] = [];
-        checkIntegrityFromBody(spec, op.requestBody, `${opPointer}/requestBody`, integrityIssues);
-        checkIntegrityFromResponses(spec, op.responses, `${opPointer}/responses`, integrityIssues);
+        if (op.requestBody)
+          checkIntegrityFromBody(spec, op.requestBody.node, op.requestBody.pointer, integrityIssues);
+        checkIntegrityFromResponses(spec, op.responses, integrityIssues);
 
         routes.push({
           path,
@@ -482,15 +618,206 @@ export function coverage(spec: unknown): SpecCoverageReport {
 }
 
 // ---------------------------------------------------------------------------
+// Operation normalization (mirrors src/openapi.ts)
+// ---------------------------------------------------------------------------
+//
+// lintSpec and coverage walk operations exactly the way the runtime adapter
+// (`fromOpenAPI`) consumes them, so the reports agree with what is actually
+// validated at runtime:
+//
+// - Operation-level `$ref`s (`requestBody` / individual responses /
+//   individual parameters pointing into `#/components/...`) are resolved
+//   before walking. Cyclic chains throw; external / unresolvable refs warn
+//   and skip the slot — the same rules as `resolveOperationNode` in
+//   src/openapi.ts.
+// - Path-item-level `parameters` are merged into every operation, with
+//   operation-level parameters winning on a `name`+`in` collision — the
+//   same merge as `normalizeOperation` in src/openapi.ts.
+// - JSON media types are matched structurally via `pickJsonContent`.
+//
+// The helpers are duplicated (not imported) to preserve this module's
+// zero-import contract.
+
+/** A dereferenced operation-level node plus the pointer where it lives. */
+interface ResolvedNode {
+  /** The dereferenced node, or `undefined` when the slot is skipped. */
+  node: Record<string, unknown> | undefined;
+  /**
+   * RFC 6901 pointer to the node's actual location: the final `$ref`
+   * target when a ref chain was followed, the inline pointer otherwise.
+   */
+  pointer: string;
+}
+
+/** A resolved response entry of a normalized operation. */
+interface NormalizedResponse {
+  status: string;
+  node: Record<string, unknown>;
+  pointer: string;
+}
+
+/** A resolved (and possibly merged-in path-item-level) parameter. */
+interface NormalizedParameter {
+  node: Record<string, unknown>;
+  pointer: string;
+}
+
+/** Operation with operation-level refs resolved and parameters merged. */
+interface NormalizedOperation {
+  requestBody?: { node: Record<string, unknown>; pointer: string };
+  responses: NormalizedResponse[];
+  parameters: NormalizedParameter[];
+}
+
+/**
+ * Resolves an operation-level `$ref` chain against the spec. Mirrors
+ * `resolveOperationNode` in src/openapi.ts: cyclic chains throw a clear
+ * `Error` naming the cycle; external (`./other.yaml#/...`) or unresolvable
+ * refs emit a `console.warn` and skip the slot — exactly what the runtime
+ * does, so a skipped slot here means an unvalidated slot there.
+ */
+function resolveOperationNode(
+  spec: unknown,
+  node: unknown,
+  inlinePointer: string,
+): ResolvedNode {
+  let current: unknown = node;
+  let pointer = inlinePointer;
+  const seen = new Set<string>();
+  while (
+    current !== null
+    && typeof current === 'object'
+    && typeof (current as Record<string, unknown>).$ref === 'string'
+  ) {
+    const ref = (current as Record<string, unknown>).$ref as string;
+    if (seen.has(ref)) {
+      throw new Error(
+        `spec-tools: cyclic operation-level $ref detected at ${inlinePointer}: `
+        + `${[...seen, ref].join(' -> ')}`,
+      );
+    }
+    seen.add(ref);
+    if (!ref.startsWith('#/')) {
+      console.warn(
+        `[fetcher] spec-tools: external $ref "${ref}" at ${inlinePointer} cannot be resolved — `
+        + `the slot is skipped (the runtime skips it too). Bundle the spec first.`,
+      );
+      return { node: undefined, pointer };
+    }
+    current = resolveRef(spec, ref);
+    if (current === undefined) {
+      console.warn(
+        `[fetcher] spec-tools: unresolved $ref "${ref}" at ${inlinePointer} — `
+        + `the slot is skipped (the runtime skips it too).`,
+      );
+      return { node: undefined, pointer };
+    }
+    pointer = ref;
+  }
+  if (current === null || typeof current !== 'object')
+    return { node: undefined, pointer };
+  return { node: current as Record<string, unknown>, pointer };
+}
+
+/**
+ * Dereferences operation-level `$ref`s and merges path-item-level
+ * `parameters` with operation-level ones (operation wins on a `name`+`in`
+ * collision). Mirrors `normalizeOperation` in src/openapi.ts, with pointer
+ * tracking added so lint/integrity issues point at the node's real source
+ * location (the component for `$ref`'d nodes, the operation otherwise).
+ */
+function normalizeOperation(
+  spec: unknown,
+  operation: Record<string, unknown>,
+  pathItemParameters: unknown,
+  opPointer: string,
+  pathPointer: string,
+): NormalizedOperation {
+  const out: NormalizedOperation = { responses: [], parameters: [] };
+
+  const requestBody = resolveOperationNode(spec, operation.requestBody, `${opPointer}/requestBody`);
+  if (requestBody.node)
+    out.requestBody = { node: requestBody.node, pointer: requestBody.pointer };
+
+  if (operation.responses && typeof operation.responses === 'object') {
+    for (const [status, rawResponse] of Object.entries(operation.responses as Record<string, unknown>)) {
+      const resolved = resolveOperationNode(
+        spec,
+        rawResponse,
+        `${opPointer}/responses/${escapePointer(status)}`,
+      );
+      if (resolved.node)
+        out.responses.push({ status, node: resolved.node, pointer: resolved.pointer });
+    }
+  }
+
+  const slotByKey = new Map<string, number>();
+  const addParameters = (list: unknown, listPointer: string): void => {
+    if (!Array.isArray(list))
+      return;
+    list.forEach((rawParam, i) => {
+      const resolved = resolveOperationNode(spec, rawParam, `${listPointer}/${i}`);
+      const node = resolved.node;
+      if (!node || typeof node.name !== 'string' || typeof node.in !== 'string')
+        return;
+      const key = `${node.in} ${node.name}`;
+      const entry: NormalizedParameter = { node, pointer: resolved.pointer };
+      const existing = slotByKey.get(key);
+      if (existing !== undefined)
+        out.parameters[existing] = entry; // operation-level overrides path-level
+      else
+        slotByKey.set(key, out.parameters.push(entry) - 1);
+    });
+  };
+  // Path-item parameters first, then operation parameters so the latter win.
+  addParameters(pathItemParameters, `${pathPointer}/parameters`);
+  addParameters(operation.parameters, `${opPointer}/parameters`);
+
+  return out;
+}
+
+/**
+ * Picks the JSON-bearing entry from a `content` map. Duplicated from
+ * `pickJsonContent` in src/openapi.ts so lint/coverage match the runtime:
+ * media types are matched structurally (parameters such as
+ * `; charset=utf-8` are stripped) — exact `application/json` wins over
+ * structured-suffix `application/*+json` types (`problem+json`,
+ * `vnd.api+json`, `hal+json`, ...), which win over the `*\/*` wildcard.
+ * Returns the matched key (for pointer construction) alongside the entry.
+ */
+function pickJsonContent(
+  content: unknown,
+): { key: string; media: Record<string, unknown> } | null {
+  if (!content || typeof content !== 'object')
+    return null;
+  let suffixMatch: { key: string; media: Record<string, unknown> } | null = null;
+  for (const [key, value] of Object.entries(content as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object')
+      continue;
+    const mime = key.split(';', 1)[0]!.trim().toLowerCase();
+    if (mime === 'application/json')
+      return { key, media: value as Record<string, unknown> };
+    if (suffixMatch === null && mime.startsWith('application/') && mime.endsWith('+json'))
+      suffixMatch = { key, media: value as Record<string, unknown> };
+  }
+  if (suffixMatch)
+    return suffixMatch;
+  const wildcard = (content as Record<string, unknown>)['*/*'];
+  if (wildcard && typeof wildcard === 'object')
+    return { key: '*/*', media: wildcard as Record<string, unknown> };
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Lint walkers (per-schema)
 // ---------------------------------------------------------------------------
 
 function walkRequestBodyForLint(
-  requestBody: unknown,
+  requestBody: Record<string, unknown>,
   pointer: string,
   driftIssues: SpecDriftIssue[],
 ): void {
-  const content = (requestBody as { content?: unknown } | undefined)?.content;
+  const content = requestBody.content;
   if (!content || typeof content !== 'object')
     return;
   for (const [mediaType, mediaContent] of Object.entries(content as Record<string, unknown>)) {
@@ -501,14 +828,11 @@ function walkRequestBodyForLint(
 }
 
 function walkResponsesForLint(
-  responses: unknown,
-  pointer: string,
+  responses: NormalizedResponse[],
   driftIssues: SpecDriftIssue[],
 ): void {
-  if (!responses || typeof responses !== 'object')
-    return;
-  for (const [status, response] of Object.entries(responses as Record<string, unknown>)) {
-    const content = (response as { content?: unknown } | undefined)?.content;
+  for (const { node, pointer } of responses) {
+    const content = node.content;
     if (!content || typeof content !== 'object')
       continue;
     for (const [mediaType, mediaContent] of Object.entries(content as Record<string, unknown>)) {
@@ -516,7 +840,7 @@ function walkResponsesForLint(
       if (schema) {
         walkForLint(
           schema,
-          `${pointer}/${escapePointer(status)}/content/${escapePointer(mediaType)}/schema`,
+          `${pointer}/content/${escapePointer(mediaType)}/schema`,
           driftIssues,
         );
       }
@@ -525,17 +849,13 @@ function walkResponsesForLint(
 }
 
 function walkParametersForLint(
-  parameters: unknown,
-  pointer: string,
+  parameters: NormalizedParameter[],
   driftIssues: SpecDriftIssue[],
 ): void {
-  if (!Array.isArray(parameters))
-    return;
-  parameters.forEach((param, i) => {
-    const schema = (param as { schema?: unknown } | undefined)?.schema;
-    if (schema)
-      walkForLint(schema, `${pointer}/${i}/schema`, driftIssues);
-  });
+  for (const { node, pointer } of parameters) {
+    if (node.schema)
+      walkForLint(node.schema, `${pointer}/schema`, driftIssues);
+  }
 }
 
 /**
@@ -635,36 +955,26 @@ function walkForLint(node: unknown, pointer: string, driftIssues: SpecDriftIssue
 
 interface SlotResult { typed: boolean; reasons: string[] }
 
-function walkBodySlot(spec: unknown, requestBody: unknown): SlotResult {
-  const content = (requestBody as { content?: unknown } | undefined)?.content;
-  if (!content || typeof content !== 'object')
-    return { typed: true, reasons: [] }; // vacuous: no body declared
-  const json = (content as Record<string, unknown>)['application/json'];
-  const schema = (json as { schema?: unknown } | undefined)?.schema;
+function walkBodySlot(spec: unknown, requestBody: Record<string, unknown> | undefined): SlotResult {
+  const schema = pickJsonContent(requestBody?.content)?.media.schema;
   if (!schema)
-    return { typed: true, reasons: [] }; // vacuous: no JSON body
+    return { typed: true, reasons: [] }; // vacuous: no body / no JSON body declared
   return walkSchemaForCoverage(spec, schema, 'body');
 }
 
 function walkResponseSlot(
   spec: unknown,
-  responses: unknown,
+  responses: NormalizedResponse[],
   slot: 'response' | 'error',
   matches: (status: string) => boolean,
 ): SlotResult {
-  if (!responses || typeof responses !== 'object')
-    return { typed: true, reasons: [] }; // vacuous: no responses declared
   const reasons: string[] = [];
   let foundAny = false;
 
-  for (const [status, response] of Object.entries(responses as Record<string, unknown>)) {
+  for (const { status, node } of responses) {
     if (!matches(status))
       continue;
-    const content = (response as { content?: unknown } | undefined)?.content;
-    if (!content || typeof content !== 'object')
-      continue;
-    const json = (content as Record<string, unknown>)['application/json'];
-    const schema = (json as { schema?: unknown } | undefined)?.schema;
+    const schema = pickJsonContent(node.content)?.media.schema;
     if (!schema)
       continue;
     foundAny = true;
@@ -816,37 +1126,23 @@ function isErrorStatus(status: string): boolean {
 
 function collectUnsupported(
   spec: unknown,
-  requestBody: unknown,
+  operation: NormalizedOperation,
   out: Set<string>,
 ): void {
-  if (!requestBody || typeof requestBody !== 'object')
-    return;
-  const content = (requestBody as { content?: unknown }).content;
-  if (!content || typeof content !== 'object')
-    return;
-  const json = (content as Record<string, unknown>)['application/json'];
-  const schema = (json as { schema?: unknown } | undefined)?.schema;
-  if (!schema)
-    return;
-  walkForUnsupported(spec, schema, out, new Set());
-}
-
-function collectUnsupportedFromResponses(
-  spec: unknown,
-  responses: unknown,
-  out: Set<string>,
-): void {
-  if (!responses || typeof responses !== 'object')
-    return;
-  for (const response of Object.values(responses as Record<string, unknown>)) {
-    const content = (response as { content?: unknown } | undefined)?.content;
-    if (!content || typeof content !== 'object')
-      continue;
-    const json = (content as Record<string, unknown>)['application/json'];
-    const schema = (json as { schema?: unknown } | undefined)?.schema;
-    if (!schema)
-      continue;
-    walkForUnsupported(spec, schema, out, new Set());
+  const bodySchema = pickJsonContent(operation.requestBody?.node.content)?.media.schema;
+  if (bodySchema)
+    walkForUnsupported(spec, bodySchema, out, new Set());
+  for (const { node } of operation.responses) {
+    const schema = pickJsonContent(node.content)?.media.schema;
+    if (schema)
+      walkForUnsupported(spec, schema, out, new Set());
+  }
+  // Parameter schemas feed the runtime's params/query validators, so their
+  // unenforced keywords belong in the route aggregate too. Path-item-level
+  // parameters are already merged in (operation wins on name+in).
+  for (const { node } of operation.parameters) {
+    if (node.schema)
+      walkForUnsupported(spec, node.schema, out, new Set());
   }
 }
 
@@ -914,53 +1210,39 @@ function walkForUnsupported(
 
 function checkIntegrityFromBody(
   spec: unknown,
-  requestBody: unknown,
+  requestBody: Record<string, unknown>,
   pointer: string,
   out: IntegrityIssue[],
 ): void {
-  if (!requestBody || typeof requestBody !== 'object')
-    return;
-  const body = requestBody as Record<string, unknown>;
-  checkUnreachableContent(body.content, pointer, out);
-  if (body.content && typeof body.content === 'object') {
-    const json = (body.content as Record<string, unknown>)['application/json'];
-    const schema = (json as { schema?: unknown } | undefined)?.schema;
-    if (schema) {
-      walkForIntegrity(
-        spec,
-        schema,
-        `${pointer}/content/application~1json/schema`,
-        out,
-        new Set(),
-      );
-    }
+  checkUnreachableContent(requestBody.content, pointer, out);
+  const json = pickJsonContent(requestBody.content);
+  if (json?.media.schema) {
+    walkForIntegrity(
+      spec,
+      json.media.schema,
+      `${pointer}/content/${escapePointer(json.key)}/schema`,
+      out,
+      new Set(),
+    );
   }
 }
 
 function checkIntegrityFromResponses(
   spec: unknown,
-  responses: unknown,
-  pointer: string,
+  responses: NormalizedResponse[],
   out: IntegrityIssue[],
 ): void {
-  if (!responses || typeof responses !== 'object')
-    return;
-  for (const [status, response] of Object.entries(responses as Record<string, unknown>)) {
-    const respPointer = `${pointer}/${escapePointer(status)}`;
-    const respObj = response as Record<string, unknown> | undefined;
-    checkUnreachableContent(respObj?.content, respPointer, out);
-    if (respObj?.content && typeof respObj.content === 'object') {
-      const json = (respObj.content as Record<string, unknown>)['application/json'];
-      const schema = (json as { schema?: unknown } | undefined)?.schema;
-      if (schema) {
-        walkForIntegrity(
-          spec,
-          schema,
-          `${respPointer}/content/application~1json/schema`,
-          out,
-          new Set(),
-        );
-      }
+  for (const { node, pointer } of responses) {
+    checkUnreachableContent(node.content, pointer, out);
+    const json = pickJsonContent(node.content);
+    if (json?.media.schema) {
+      walkForIntegrity(
+        spec,
+        json.media.schema,
+        `${pointer}/content/${escapePointer(json.key)}/schema`,
+        out,
+        new Set(),
+      );
     }
   }
 }
@@ -972,16 +1254,16 @@ function checkUnreachableContent(
 ): void {
   if (!content || typeof content !== 'object')
     return;
-  const c = content as Record<string, unknown>;
-  const mediaTypes = Object.keys(c);
+  const mediaTypes = Object.keys(content as Record<string, unknown>);
   if (mediaTypes.length === 0)
     return;
-  const consumable = mediaTypes.some(m => m === 'application/json' || m === '*/*');
-  if (!consumable) {
+  // Consumable = the runtime's pickJsonContent would match something:
+  // exact application/json, application/*+json, or */* (params stripped).
+  if (pickJsonContent(content) === null) {
     out.push({
       kind: 'unreachable_response',
       pointer: `${pointer}/content`,
-      message: `Response declares content in [${mediaTypes.join(', ')}] but no application/json or */* media type — fetcher extracts only JSON by default, so this schema is unreachable.`,
+      message: `Response declares content in [${mediaTypes.join(', ')}] but no application/json, application/*+json, or */* media type — fetcher extracts only JSON by default, so this schema is unreachable.`,
     });
   }
 }

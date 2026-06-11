@@ -47,7 +47,7 @@ describe('timeout middleware', () => {
       expect(result.data).toEqual({ ok: true });
   });
 
-  it('aborts a slow request and surfaces as kind:network', async () => {
+  it('aborts a slow request and surfaces as kind:timeout', async () => {
     const f = createFetch({
       baseUrl: 'https://api.example.com',
       timeout: 30,
@@ -58,11 +58,10 @@ describe('timeout middleware', () => {
     const result = await response.result();
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.kind).toBe('network');
-      // The cause is whatever AbortSignal.timeout aborted with —
-      // typically a TimeoutError or AbortError.
-      const cause = result.error.kind === 'network' ? result.error.cause : null;
-      expect(cause).toBeDefined();
+      expect(result.error.kind).toBe('timeout');
+      // The middleware aborts with a TimeoutError DOMException.
+      const cause = result.error.kind === 'timeout' ? result.error.cause : null;
+      expect((cause as Error).name).toBe('TimeoutError');
     }
   });
 
@@ -78,7 +77,7 @@ describe('timeout middleware', () => {
     const result = await response.result();
     expect(result.ok).toBe(false);
     if (!result.ok)
-      expect(result.error.kind).toBe('network');
+      expect(result.error.kind).toBe('timeout');
   });
 
   it('user-supplied AbortSignal still aborts the request', async () => {
@@ -93,8 +92,12 @@ describe('timeout middleware', () => {
     const response = await f('/test', { method: 'GET', signal: controller.signal });
     const result = await response.result();
     expect(result.ok).toBe(false);
-    if (!result.ok)
-      expect(result.error.kind).toBe('network');
+    // A caller-initiated cancellation is distinguishable from a deadline.
+    if (!result.ok) {
+      expect(result.error.kind).toBe('aborted');
+      if (result.error.kind === 'aborted')
+        expect((result.error.cause as Error).message).toBe('user-cancelled');
+    }
   });
 
   it('explicit timeout middleware in middleware: [...] also works', async () => {
@@ -110,7 +113,7 @@ describe('timeout middleware', () => {
     const result = await response.result();
     expect(result.ok).toBe(false);
     if (!result.ok)
-      expect(result.error.kind).toBe('network');
+      expect(result.error.kind).toBe('timeout');
   });
 
   it('combines with retry: each attempt gets a fresh timeout', async () => {

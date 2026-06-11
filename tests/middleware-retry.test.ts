@@ -119,7 +119,7 @@ describe('retry middleware', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('honors a numeric Retry-After header', async () => {
+  it('honors a numeric Retry-After header (integer seconds, RFC 9110 1*DIGIT)', async () => {
     let calls = 0;
     const timestamps: number[] = [];
     const f = createFetch({
@@ -132,7 +132,7 @@ describe('retry middleware', () => {
         if (calls === 1) {
           return new Response('throttled', {
             status: 429,
-            headers: { 'retry-after': '0.05' }, // 50 ms
+            headers: { 'retry-after': '1' },
           });
         }
         return jsonResponse({ ok: true });
@@ -142,9 +142,60 @@ describe('retry middleware', () => {
     const response = await f('/test', { method: 'GET' });
     const result = await response.result();
     expect(result.ok).toBe(true);
-    // The 50 ms Retry-After should have introduced a noticeable delay
-    // between attempts 1 and 2 (much longer than the 0 ms backoff).
-    expect(timestamps[1]! - timestamps[0]!).toBeGreaterThanOrEqual(40);
+    // The 1 s Retry-After should dominate the 0 ms backoff.
+    expect(timestamps[1]! - timestamps[0]!).toBeGreaterThanOrEqual(900);
+  });
+
+  it('ignores malformed Retry-After values (fractional/negative are not 1*DIGIT)', async () => {
+    let calls = 0;
+    const timestamps: number[] = [];
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      retry: { attempts: 2, backoff: 0 },
+      fetch: async () => {
+        timestamps.push(Date.now());
+        calls++;
+        if (calls === 1) {
+          return new Response('throttled', {
+            status: 429,
+            headers: { 'retry-after': '-5.5e3' },
+          });
+        }
+        return jsonResponse({ ok: true });
+      },
+    });
+
+    const result = await f('/test', { method: 'GET' }).result();
+    expect(result.ok).toBe(true);
+    // Malformed value → fall back to (zero) backoff, no surprise delay.
+    expect(timestamps[1]! - timestamps[0]!).toBeLessThan(500);
+  });
+
+  it('caps a server-sent Retry-After at maxRetryAfter', async () => {
+    let calls = 0;
+    const timestamps: number[] = [];
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      retry: { attempts: 2, backoff: 0, maxRetryAfter: 50 },
+      fetch: async () => {
+        timestamps.push(Date.now());
+        calls++;
+        if (calls === 1) {
+          return new Response('throttled', {
+            status: 429,
+            // A day — must NOT stall the client for a day.
+            headers: { 'retry-after': '86400' },
+          });
+        }
+        return jsonResponse({ ok: true });
+      },
+    });
+
+    const result = await f('/test', { method: 'GET' }).result();
+    expect(result.ok).toBe(true);
+    const delay = timestamps[1]! - timestamps[0]!;
+    expect(delay).toBeGreaterThanOrEqual(40);
+    expect(delay).toBeLessThan(2_000);
   });
 
   it('clones the request body between attempts (regression for stream bodies)', async () => {
@@ -152,7 +203,8 @@ describe('retry middleware', () => {
     let calls = 0;
     const f = createFetch({
       baseUrl: 'https://api.example.com',
-      retry: { attempts: 3, backoff: 0 },
+      // POST requires explicit opt-in to retry (idempotency gating).
+      retry: { attempts: 3, backoff: 0, methods: ['POST'] },
       fetch: async (req) => {
         bodies.push(await req.text());
         calls++;
@@ -195,7 +247,41 @@ describe('retry middleware', () => {
     expect(calls).toBe(1);
     expect(result.ok).toBe(false);
     if (!result.ok)
-      expect(result.error.kind).toBe('network');
+      expect(result.error.kind).toBe('aborted');
+  });
+
+  it('does not retry non-idempotent methods by default (RFC 9110 §9.2.2)', async () => {
+    let calls = 0;
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      retry: { attempts: 3, backoff: 0 },
+      fetch: async () => {
+        calls++;
+        return new Response('boom', { status: 500 });
+      },
+    });
+
+    const result = await f('/test', { method: 'POST', body: { a: 1 } }).result();
+    expect(calls).toBe(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === 'http')
+      expect(result.error.status).toBe(500);
+  });
+
+  it('retry: 0 / attempts below 1 still send the request exactly once', async () => {
+    let calls = 0;
+    const f = createFetch({
+      baseUrl: 'https://api.example.com',
+      retry: 0,
+      fetch: async () => {
+        calls++;
+        return jsonResponse({ ok: true });
+      },
+    });
+
+    const result = await f('/test', { method: 'GET' }).result();
+    expect(calls).toBe(1);
+    expect(result.ok).toBe(true);
   });
 
   it('per-call retry overrides FetchConfig.retry', async () => {

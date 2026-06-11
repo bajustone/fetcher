@@ -139,3 +139,41 @@ export type Case4 = Verify<
     import('../../src/types.ts').ResultData<{ id: string; name: string }>
   >
 >;
+
+// ---------------------------------------------------------------------------
+// Negative assertions — invalid inputs must fail to compile.
+// ---------------------------------------------------------------------------
+
+function _negNonStandardSchema() {
+  return f('/anything', {
+    method: 'GET',
+    // @ts-expect-error — a bare `{ parse }` validator is not a Standard Schema V1
+    responseSchema: { parse: (v: unknown) => v },
+  });
+}
+
+const routedWithBody = createFetch({
+  baseUrl: 'https://api.example.com',
+  routes: {
+    '/posts': {
+      POST: { body: s<{ title: string }>() },
+    },
+  },
+});
+
+function _negWrongBodyType() {
+  return routedWithBody('/posts', {
+    method: 'POST',
+    // @ts-expect-error — `title` must be a string
+    body: { title: 42 },
+  });
+}
+
+function _negMissingBody() {
+  // @ts-expect-error — the route declares a body schema, so `body` is required
+  return routedWithBody('/posts', { method: 'POST' });
+}
+
+void _negNonStandardSchema;
+void _negWrongBodyType;
+void _negMissingBody;

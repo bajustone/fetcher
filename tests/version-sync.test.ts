@@ -18,3 +18,28 @@ describe('manifest version sync', () => {
     expect(jsr.version).toBe(pkg.version);
   });
 });
+
+describe('manifest exports parity', () => {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+  const jsr = JSON.parse(readFileSync(join(root, 'jsr.json'), 'utf-8'));
+
+  it('package.json and jsr.json expose the same subpath keys', () => {
+    expect(Object.keys(pkg.exports).sort()).toEqual(Object.keys(jsr.exports).sort());
+  });
+
+  it('every npm export is the compiled dist twin of the jsr src entry', () => {
+    for (const [key, srcEntry] of Object.entries(jsr.exports as Record<string, string>)) {
+      const npmEntry = pkg.exports[key] as { types: string; default: string };
+      // ./src/foo/bar.ts → ./dist/foo/bar.js / .d.ts
+      const expectedJs = srcEntry.replace('./src/', './dist/').replace(/\.ts$/, '.js');
+      const expectedDts = srcEntry.replace('./src/', './dist/').replace(/\.ts$/, '.d.ts');
+      expect(npmEntry.default).toBe(expectedJs);
+      expect(npmEntry.types).toBe(expectedDts);
+    }
+  });
+
+  it('types condition comes first in every export (publint rule)', () => {
+    for (const entry of Object.values(pkg.exports as Record<string, Record<string, string>>))
+      expect(Object.keys(entry)[0]).toBe('types');
+  });
+});

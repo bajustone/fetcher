@@ -19,7 +19,9 @@ export type StandardSchemaV1PathSegment = PropertyKey | { readonly key: Property
  * A single validation issue produced by a Standard Schema V1 validator.
  */
 export interface StandardSchemaV1Issue {
+  /** Human-readable description of the failure. */
   readonly message: string;
+  /** Path from the validated root to the failing value, when applicable. */
   readonly path?: ReadonlyArray<StandardSchemaV1PathSegment>;
   /**
    * Optional machine-readable code. Emitted by the bundled schema builder
@@ -48,6 +50,7 @@ export type StandardSchemaV1Result<Output>
  * here so the library has no runtime or type dependency on the spec package.
  */
 export interface StandardSchemaV1<Input = unknown, Output = Input> {
+  /** The Standard Schema V1 protocol object: spec version, vendor name, and the validator. */
   readonly '~standard': {
     readonly version: 1;
     readonly vendor: string;
@@ -100,18 +103,30 @@ export type FetcherErrorLocation = 'body' | 'params' | 'query' | 'response';
 
 /**
  * Discriminated error type surfaced by {@link TypedResponse.result}. Every
- * failure path collapses into one of three kinds:
+ * failure path collapses into one of five kinds:
  *
- * - `'network'` — the underlying fetch threw, the body could not be parsed,
- *   or some other transport-level failure occurred. `cause` holds the raw
- *   thrown value (typically an `Error`).
+ * - `'network'` — the underlying fetch threw (DNS failure, connection
+ *   refused, TLS error) or some other transport-level failure occurred.
+ *   `cause` holds the raw thrown value (typically an `Error`).
+ * - `'timeout'` — the request was aborted by a deadline: the `timeout()`
+ *   middleware fired, or any abort whose reason is a `TimeoutError`
+ *   `DOMException` (e.g. a user-supplied `AbortSignal.timeout(...)`).
+ * - `'aborted'` — the caller cancelled the request on purpose via its
+ *   `AbortSignal`. Distinguishing this from `'timeout'`/`'network'` lets
+ *   UIs suppress error toasts for intentional cancellations.
  * - `'validation'` — a Standard Schema V1 validator returned `issues` for
  *   the body/params/query (client-side, before the request was sent) or
  *   for the response body (server-side). `location` and `issues` describe
- *   exactly what failed.
+ *   exactly what failed; for `location: 'response'`, `status` carries the
+ *   HTTP status code of the response that failed validation.
  * - `'http'` — the server returned a 4xx or 5xx response. `status` holds
  *   the HTTP status code; `body` holds the parsed (and, if a route
- *   `errorResponse` schema was declared, validated) error body.
+ *   `errorResponse` schema was declared, validated) error body. When the
+ *   body claimed to be JSON but did not parse, `body` is the raw text.
+ *
+ * Old-runtime caveat: Chrome 103–123 reported timeouts with an
+ * `AbortError` name instead of `TimeoutError`; on those runtimes a
+ * middleware-driven timeout may surface as `'aborted'`.
  *
  * @example
  * ```typescript
@@ -119,6 +134,8 @@ export type FetcherErrorLocation = 'body' | 'params' | 'query' | 'response';
  * if (!result.ok) {
  *   switch (result.error.kind) {
  *     case 'network': console.error('network', result.error.cause); break;
+ *     case 'timeout': console.error('timed out', result.error.cause); break;
+ *     case 'aborted': break; // intentional — usually no UI feedback needed
  *     case 'validation': console.error('invalid', result.error.location, result.error.issues); break;
  *     case 'http': console.error('http', result.error.status, result.error.body); break;
  *   }
@@ -127,10 +144,14 @@ export type FetcherErrorLocation = 'body' | 'params' | 'query' | 'response';
  */
 export type FetcherError<HttpBody = unknown>
   = | { readonly kind: 'network'; readonly cause: unknown }
+    | { readonly kind: 'timeout'; readonly cause: unknown }
+    | { readonly kind: 'aborted'; readonly cause: unknown }
     | {
       readonly kind: 'validation';
       readonly location: FetcherErrorLocation;
       readonly issues: ReadonlyArray<StandardSchemaV1Issue>;
+      /** HTTP status of the response, when `location` is `'response'`. */
+      readonly status?: number;
     }
     | { readonly kind: 'http'; readonly status: number; readonly body: HttpBody };
 
@@ -178,22 +199,28 @@ export interface TypedResponse<T = unknown, HttpErrorBody = unknown> extends Res
 
 /**
  * Describes a cache-friendly query derived from a typed fetch call.
- * The `key` is deterministic (same path + method + params + query →
- * same key) and the `fn` calls `.unwrap()` internally — compatible
- * with TanStack Query, SWR, Pinia Colada, or any cache that accepts
- * a key + async function.
+ * The `key` is deterministic — `[method, url, inputs?]` where `url` is the
+ * fully joined request URL and `inputs` bundles whichever of
+ * `params` / `query` / `body` were supplied — so two clients pointed at
+ * different `baseUrl`s, or two POSTs with different bodies, never collide.
+ * The `fn` performs a **fresh request on every invocation** (calling
+ * `.unwrap()` internally), so cache refetches always hit the network —
+ * compatible with TanStack Query, SWR, Pinia Colada, or any cache that
+ * accepts a key + async function.
  *
  * ```typescript
  * const { key, fn } = api.get('/users', { query: { page: 1 } }).query();
- * // key: ['GET', '/users', { page: 1 }]
- * // fn:  () => Promise<User[]>
+ * // key: ['GET', 'https://api.example.com/users', { query: { page: 1 } }]
+ * // fn:  () => Promise<User[]>   (each call = a new request)
  *
  * useQuery({ queryKey: key, queryFn: fn });  // TanStack Query
  * useSWR(key, fn);                           // SWR
  * ```
  */
 export interface QueryDescriptor<T> {
-  readonly key: ReadonlyArray<string | Record<string, unknown>>;
+  /** Deterministic cache key: `[method, fullUrl, { params?, query?, body? }?]`. */
+  readonly key: ReadonlyArray<unknown>;
+  /** Fetches and unwraps the data — a fresh request on every invocation. */
   readonly fn: () => Promise<T>;
 }
 
@@ -205,6 +232,12 @@ export interface QueryDescriptor<T> {
  * - `.unwrap()` — resolves to `T` directly, throws `FetcherRequestError` on failure
  * - `.query()` — returns `{ key, fn }` for cache libraries (synchronous, does not fetch)
  *
+ * **Laziness:** the request is dispatched the first time the promise is
+ * consumed — `await`, `.then()`, `.result()`, or `.unwrap()`. Calling only
+ * `.query()` dispatches nothing: the descriptor's `fn()` issues a fresh
+ * request on each invocation, so caching libraries control exactly when
+ * (and how often) the network is hit.
+ *
  * ```typescript
  * // Safe — discriminated union, never throws:
  * const result = await f.get('/pets').result();
@@ -212,7 +245,7 @@ export interface QueryDescriptor<T> {
  * // Throwing — for load functions, server actions, remote functions:
  * const pets = await f.get('/pets').unwrap();
  *
- * // Cache-friendly — for TanStack Query, SWR, etc.:
+ * // Cache-friendly — for TanStack Query, SWR, etc. (no request fired here):
  * const { key, fn } = f.get('/pets').query();
  * ```
  */
@@ -228,8 +261,9 @@ export type TypedFetchPromise<T = unknown, HttpErrorBody = unknown>
     unwrap: () => Promise<T>;
     /**
      * Returns a {@link QueryDescriptor} with a deterministic cache `key`
-     * and an async `fn` that calls `.unwrap()`. Does not trigger the fetch —
-     * the fetch runs when `fn()` is called by the caching library.
+     * and an async `fn`. Does not trigger the fetch — and `fn()` performs a
+     * fresh request (via `.unwrap()`) every time the caching library calls
+     * it, so refetches and invalidations always reach the network.
      */
     query: () => QueryDescriptor<T>;
   };
@@ -239,7 +273,7 @@ export type TypedFetchPromise<T = unknown, HttpErrorBody = unknown>
 // ---------------------------------------------------------------------------
 
 /** HTTP verbs supported by the router. */
-export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
 
 /**
  * Schema bundle for a single `path × method` pair. Every field is optional;
@@ -289,7 +323,16 @@ export type Routes = Record<string, Partial<Record<HttpMethod, RouteDefinition>>
  * also include `summary`, `description`, `parameters`, etc.) down to just
  * the methods this library supports.
  */
-type LowercaseHttpMethod = 'get' | 'post' | 'put' | 'delete' | 'patch';
+type LowercaseHttpMethod = 'get' | 'post' | 'put' | 'delete' | 'patch' | 'head' | 'options';
+
+/**
+ * Keys of `PathItem` whose value is actually defined. openapi-typescript
+ * emits every unused verb as `head?: never` / `options?: never` markers —
+ * without this filter those phantom keys would surface in method
+ * autocomplete and {@link IsTypedCall} even though no operation exists.
+ */
+type DefinedMethodKeys<PathItem>
+  = { [K in keyof PathItem]-?: [Exclude<PathItem[K], undefined>] extends [never] ? never : K }[keyof PathItem];
 
 /**
  * Walks the literal type of an OpenAPI spec and produces a narrowed
@@ -352,8 +395,8 @@ export type InferRoutesFromSpec<S>
     ? Paths extends Record<string, unknown>
       ? {
           [P in keyof Paths & string]: {
-            [M in keyof Paths[P] & LowercaseHttpMethod as Uppercase<M>]:
-            InferredRouteDefinition<Paths[P][M], GetSpecDefs<S>>;
+            [M in Extract<DefinedMethodKeys<Paths[P]>, LowercaseHttpMethod> as Uppercase<M>]:
+            InferredRouteDefinition<Paths[P][M], GetSpecDefs<S>, GetSpecComponents<S>>;
           };
         }
       : Routes
@@ -361,6 +404,15 @@ export type InferRoutesFromSpec<S>
 
 type GetSpecDefs<S>
   = S extends { components: { schemas: infer D } } ? D : object;
+
+/**
+ * The spec's whole `components` object — lets `InferredRouteDefinition`
+ * dereference operation-level `requestBody`/`responses` `$ref`s
+ * (`#/components/requestBodies/N`, `#/components/responses/N`) like the
+ * runtime does.
+ */
+type GetSpecComponents<S>
+  = S extends { components: infer C } ? C : object;
 
 // ---------------------------------------------------------------------------
 // OpenAPI paths inference (D6 — typed body/response from generated `paths`)
@@ -533,7 +585,7 @@ export type AvailablePaths<R extends Routes, OAS>
 export type AvailableMethods<R extends Routes, OAS, Path extends string>
   = HasPaths<OAS> extends true
     ? Path extends keyof OAS
-      ? Uppercase<Extract<keyof OAS[Path], LowercaseHttpMethod>> | (string & {})
+      ? Uppercase<Extract<DefinedMethodKeys<OAS[Path]>, LowercaseHttpMethod>> | (string & {})
       : string
     : Path extends keyof R
       ? (keyof R[Path] & string) | (string & {})
@@ -548,7 +600,7 @@ export type AvailableMethods<R extends Routes, OAS, Path extends string>
 export type IsTypedCall<R extends Routes, OAS, P extends string, M extends string>
   = HasPaths<OAS> extends true
     ? P extends keyof OAS
-      ? Lowercase<M> extends keyof OAS[P]
+      ? Lowercase<M> extends DefinedMethodKeys<OAS[P]>
         ? true
         : false
       : false
@@ -588,12 +640,12 @@ export type ResolveParamsFor<R extends Routes, OAS, P extends string, M extends 
     ? [ResolveParamsFromPaths<OAS, P, M>] extends [never]
         ? [ExtractPathParams<P>] extends [never]
             ? never
-            : Record<ExtractPathParams<P>, string>
+            : Record<ExtractPathParams<P>, string | number>
         : ResolveParamsFromPaths<OAS, P, M>
     : R extends Routes
       ? [ExtractPathParams<P>] extends [never]
           ? never
-          : Record<ExtractPathParams<P>, string>
+          : Record<ExtractPathParams<P>, string | number>
       : never;
 
 /**
@@ -642,7 +694,7 @@ export type ResolveErrorResponseFor<R extends Routes, OAS, P extends string, M e
  */
 export type PathsToRoutes<P> = {
   [Path in keyof P & string]: {
-    [M in keyof P[Path] & LowercaseHttpMethod as Uppercase<M>]: {
+    [M in Extract<DefinedMethodKeys<P[Path]>, LowercaseHttpMethod> as Uppercase<M>]: {
       body?: Schema<ResolveBodyFromPaths<P, Path, Uppercase<M>>>;
       params?: Schema<ResolveParamsFromPaths<P, Path, Uppercase<M>>>;
       query?: Schema<ResolveQueryFromPaths<P, Path, Uppercase<M>>>;
@@ -707,7 +759,11 @@ export type Middleware = (
  * for `{ attempts: n }`.
  */
 export interface RetryOptions {
-  /** Maximum number of attempts (including the first). Default: 3. */
+  /**
+   * Maximum number of attempts (including the first). Default: 3.
+   * Values below 1 are clamped to 1 — the request is always sent at
+   * least once; `attempts: 1` means "no retries".
+   */
   attempts?: number;
   /** Initial backoff delay in milliseconds. Default: 100. */
   backoff?: number;
@@ -723,7 +779,33 @@ export interface RetryOptions {
    * Default: `[408, 425, 429, 500, 502, 503, 504]`
    */
   retryOn?: readonly number[];
+  /**
+   * HTTP methods eligible for retry. Defaults to the idempotent methods
+   * per RFC 9110 §9.2.2 — `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`,
+   * `TRACE`. `POST`/`PATCH` are **not** retried by default because a
+   * request that failed at the network layer may still have been applied
+   * by the server; re-sending it can double-apply the operation. Opt in
+   * explicitly (e.g. `methods: ['GET', 'POST']`) when the endpoint is
+   * known to be idempotent — ideally paired with an `Idempotency-Key`
+   * header. Matching is case-insensitive.
+   */
+  methods?: readonly string[];
+  /**
+   * Upper bound (in milliseconds) applied to a server-sent `Retry-After`
+   * header, so a hostile or misconfigured server cannot stall the client
+   * indefinitely (e.g. `Retry-After: 86400`). Defaults to `maxBackoff`.
+   */
+  maxRetryAfter?: number;
 }
+
+/**
+ * Serializes the per-call `query` object into a query string. Return either
+ * a ready-to-append string (without the leading `?`) or a `URLSearchParams`.
+ * Overrides the built-in serializer (repeated keys for arrays — OpenAPI
+ * `form`/`explode=true` style; `Date` → ISO 8601; `undefined`/`null`
+ * dropped).
+ */
+export type QuerySerializer = (query: Record<string, unknown>) => string | URLSearchParams;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -798,12 +880,19 @@ export interface FetchConfig<R extends Routes = Routes> {
    */
   timeout?: number;
   /**
-   * If set, retryable failures (network errors, 408/425/429/5xx) are
-   * automatically retried via an auto-prepended `retry()` middleware.
-   * Pass a number as shorthand for `{ attempts: n }`. Per-call `retry`
-   * overrides this for individual requests.
+   * If set, retryable failures (network errors and 408/425/429/500/502/
+   * 503/504 responses) on idempotent methods are automatically retried via
+   * an auto-prepended `retry()` middleware. Pass a number as shorthand for
+   * `{ attempts: n }`. Per-call `retry` overrides this for individual
+   * requests.
    */
   retry?: number | RetryOptions;
+  /**
+   * Custom query-string serializer applied to every call's `query` object.
+   * Per-call `querySerializer` overrides this for individual requests.
+   * See {@link QuerySerializer} for the built-in behavior it replaces.
+   */
+  querySerializer?: QuerySerializer;
 }
 
 // ---------------------------------------------------------------------------
@@ -948,14 +1037,19 @@ export type TypedFetchOptions<
    * the matched route.
    */
   responseSchema?: AdHoc;
-} & (ResolveBodyFor<R, OAS, P, M> extends never
+  /**
+   * Per-call query-string serializer. Overrides `FetchConfig.querySerializer`
+   * and the built-in serializer for this request only.
+   */
+  querySerializer?: QuerySerializer;
+} & ([ResolveBodyFor<R, OAS, P, M>] extends [never]
   ? { body?: unknown }
   : { body: ResolveBodyFor<R, OAS, P, M> })
-& (ResolveParamsFor<R, OAS, P, M> extends never
+& ([ResolveParamsFor<R, OAS, P, M>] extends [never]
   ? { params?: undefined }
   : { params: ResolveParamsFor<R, OAS, P, M> })
-& (ResolveQueryFor<R, OAS, P, M> extends never
-  ? { /** Query string object. Values are coerced to strings; `undefined`/`null` are dropped. */ query?: Record<string, string | number | boolean | undefined> }
+& ([ResolveQueryFor<R, OAS, P, M>] extends [never]
+  ? { /** Query string object. Arrays become repeated keys; `Date` → ISO 8601; `undefined`/`null` are dropped. */ query?: Record<string, string | number | boolean | Date | ReadonlyArray<string | number | boolean> | undefined> }
   : { /** Typed query parameters from the route definition. */ query?: ResolveQueryFor<R, OAS, P, M> });
 
 /**
@@ -969,20 +1063,39 @@ type UntypedFetchOptions<
 > = Omit<RequestInit, 'method' | 'body'> & {
   method: string;
   body?: unknown;
-  params?: Record<string, string>;
-  query?: Record<string, string | number | boolean | undefined>;
+  params?: Record<string, string | number>;
+  query?: Record<string, string | number | boolean | Date | ReadonlyArray<string | number | boolean> | undefined>;
   fetch?: FetchFn;
   middleware?: Middleware[] | false;
   timeout?: number;
   retry?: number | RetryOptions;
   responseSchema?: AdHoc;
+  querySerializer?: QuerySerializer;
 };
+
+/**
+ * True when a typed call at `path` × `method` has at least one required
+ * input — a declared request body or path parameters. Drives whether the
+ * shortcut's `options` argument is itself required: `f.post('/login')`
+ * must not typecheck when the route demands a body, and
+ * `f.get('/users/{id}')` must not typecheck without `params`.
+ */
+type RequiresOptions<R extends Routes, OAS, P extends string, M extends string>
+  = [ResolveBodyFor<R, OAS, P, M>] extends [never]
+    ? [ResolveParamsFor<R, OAS, P, M>] extends [never]
+        ? false
+        : true
+    : true;
 
 /**
  * Per-method shortcut type used by {@link TypedFetchFn}'s `.get`, `.post`,
  * etc. Mirrors {@link TypedFetchFn} but pins the HTTP method `M` and omits
  * the `method` field from the options object — so callers write
  * `f.get('/users')` instead of `f('/users', { method: 'GET' })`.
+ *
+ * The `options` argument is **required** whenever the route declares a
+ * request body or the path contains `{param}` placeholders, so a missing
+ * body/params is a compile error instead of a runtime validation failure.
  */
 export type MethodShortcutFn<
   R extends Routes,
@@ -992,10 +1105,11 @@ export type MethodShortcutFn<
   P extends AvailablePaths<R, OAS>,
   AdHoc extends StandardSchemaV1 | undefined = undefined,
 >(
-  path: P,
-  options?: IsTypedCall<R, OAS, P, M> extends true
-    ? Omit<TypedFetchOptions<R, P, M, AdHoc, OAS>, 'method'>
-    : Omit<UntypedFetchOptions<AdHoc>, 'method'>,
+  ...args: IsTypedCall<R, OAS, P, M> extends true
+    ? RequiresOptions<R, OAS, P, M> extends true
+      ? [path: P, options: Omit<TypedFetchOptions<R, P, M, AdHoc, OAS>, 'method'>]
+      : [path: P, options?: Omit<TypedFetchOptions<R, P, M, AdHoc, OAS>, 'method'>]
+    : [path: P, options?: Omit<UntypedFetchOptions<AdHoc>, 'method'>]
 ) => TypedFetchPromise<
   IsTypedCall<R, OAS, P, M> extends true
     ? ResolveAdHocResponse<AdHoc, ResolveResponseFor<R, OAS, P, M>>
@@ -1083,4 +1197,8 @@ export interface TypedFetchFn<R extends Routes, OAS = unknown> {
   delete: MethodShortcutFn<R, 'DELETE', OAS>;
   /** Method shortcut: `f.patch(path, opts?)` ≡ `f(path, { ...opts, method: 'PATCH' })` */
   patch: MethodShortcutFn<R, 'PATCH', OAS>;
+  /** Method shortcut: `f.head(path, opts?)` ≡ `f(path, { ...opts, method: 'HEAD' })` */
+  head: MethodShortcutFn<R, 'HEAD', OAS>;
+  /** Method shortcut: `f.options(path, opts?)` ≡ `f(path, { ...opts, method: 'OPTIONS' })` */
+  options: MethodShortcutFn<R, 'OPTIONS', OAS>;
 }

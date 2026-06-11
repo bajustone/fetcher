@@ -21,11 +21,16 @@
  *   - No coercion / preprocess — both sides are strict.
  *   - fetcher objects pass unknown keys through, so Zod objects are built with
  *     `.passthrough()` to match (Zod strips by default).
- *   - `multipleOf` / string `format` enforcement differences — not exercised
- *     here (covered by the unit suite instead).
- *   - Explicit `undefined` for an `optional()` object key (fetcher runs the
- *     inner validator, Zod short-circuits) — not generated; `default_` keys,
- *     which agree on `undefined`, are used instead.
+ *   - String length semantics: fetcher counts Unicode CODE POINTS (JSON
+ *     Schema 2020-12 / RFC 8259), Zod counts UTF-16 code units. They diverge
+ *     on astral-plane characters ('💩' is 1 vs 2), so the grammar generates
+ *     only BMP/ASCII strings for length-constrained schemas. Do not add
+ *     astral strings to the length-comparison inputs — the divergence is by
+ *     design (covered by the JSON-Schema-suite tests instead).
+ *   - String `format` enforcement differences — not exercised here (covered
+ *     by the unit suite instead). `multipleOf` IS exercised, with steps and
+ *     values where the two float strategies (fetcher: quotient-vs-epsilon,
+ *     Zod: decimal-scaled remainder) provably agree.
  */
 
 import type { FSchema } from '../src/schema/index.ts';
@@ -36,8 +41,11 @@ import {
   array,
   boolean,
   default_,
+  discriminatedUnion,
   enum_,
   integer,
+  intersect,
+  literal,
   nullable,
   number,
   object,
@@ -88,12 +96,19 @@ type Desc
     | { t: 'enum'; values: string[] }
     | { t: 'upper' } // string -> toUpperCase()
     | { t: 'inc' } // number -> +1
+    | { t: 'stringC'; minLength: number; maxLength: number } // ASCII only — see header
+    | { t: 'patternC' } // '^[a-z]+$'
+    | { t: 'numberC'; minimum: number; maximum: number }
+    | { t: 'exclusiveC'; gt: number; lt: number }
+    | { t: 'multipleC'; step: number } // integer step — exact in both float strategies
     | { t: 'default'; value: string; inner: { t: 'string' } }
     | { t: 'nullable'; inner: Desc }
     | { t: 'array'; inner: Desc }
     | { t: 'record'; inner: Desc }
     | { t: 'tuple'; items: Desc[] }
     | { t: 'union'; variants: Desc[] }
+    | { t: 'intersect'; aKey: string; aInner: Desc; bKey: string; bInner: Desc }
+    | { t: 'dunion'; key: string; variants: Array<{ tag: string; inner: Desc }> }
     | { t: 'object'; props: Array<{ key: string; kind: 'required' | 'optional' | 'default'; inner: Desc }> };
 
 // `default` is intentionally NOT a nestable leaf: wrapping it in
@@ -101,7 +116,7 @@ type Desc
 // fetcher and Zod resolve differently (a documented esoteric corner, not a
 // filed bug). It's exercised as an object-property kind and via the explicit
 // default-in-collection cases below.
-const LEAVES: Array<() => Desc> = [
+const LEAVES: Array<(rng: () => number) => Desc> = [
   () => ({ t: 'string' }),
   () => ({ t: 'number' }),
   () => ({ t: 'integer' }),
@@ -109,13 +124,37 @@ const LEAVES: Array<() => Desc> = [
   () => ({ t: 'enum', values: ['red', 'green', 'blue'] }),
   () => ({ t: 'upper' }),
   () => ({ t: 'inc' }),
+  (rng) => {
+    const minLength = randInt(rng, 0, 3);
+    return { t: 'stringC', minLength, maxLength: minLength + randInt(rng, 0, 3) };
+  },
+  () => ({ t: 'patternC' }),
+  (rng) => {
+    const minimum = randInt(rng, -10, 5);
+    return { t: 'numberC', minimum, maximum: minimum + randInt(rng, 0, 10) };
+  },
+  (rng) => {
+    const gt = randInt(rng, -5, 2);
+    return { t: 'exclusiveC', gt, lt: gt + randInt(rng, 2, 8) };
+  },
+  rng => ({ t: 'multipleC', step: pick(rng, [1, 2, 3, 5]) }),
 ];
+
+// Plain (transform- and default-free) leaves for intersect members: Zod's
+// intersection parses the SAME input through both sides and deep-merges the
+// results, so a transform on one side would produce an "unmergeable" conflict
+// that fetcher's thread-through strategy resolves differently.
+const PLAIN_LEAVES: Array<(rng: () => number) => Desc>
+  = LEAVES.filter((make) => {
+    const t = make(mulberry32(1)).t;
+    return t !== 'upper' && t !== 'inc';
+  });
 
 function genDesc(rng: () => number, depth: number): Desc {
   if (depth <= 0)
-    return pick(rng, LEAVES)();
+    return pick(rng, LEAVES)(rng);
 
-  const kind = pick(rng, ['leaf', 'object', 'array', 'record', 'tuple', 'union', 'nullable']);
+  const kind = pick(rng, ['leaf', 'object', 'array', 'record', 'tuple', 'union', 'nullable', 'intersect', 'dunion']);
   switch (kind) {
     case 'object': {
       const n = randInt(rng, 1, 3);
@@ -141,10 +180,29 @@ function genDesc(rng: () => number, depth: number): Desc {
       // Distinct primitive variants so a value matches exactly one — keeps
       // first-match output unambiguous across both validators.
       return { t: 'union', variants: [{ t: 'string' }, { t: 'number' }, { t: 'boolean' }] };
+    case 'intersect':
+      // Two single-prop objects with DISTINCT keys — merge-conflict-free, so
+      // output parity is well-defined on both sides.
+      return {
+        t: 'intersect',
+        aKey: 'ia',
+        aInner: pick(rng, PLAIN_LEAVES)(rng),
+        bKey: 'ib',
+        bInner: pick(rng, PLAIN_LEAVES)(rng),
+      };
+    case 'dunion':
+      return {
+        t: 'dunion',
+        key: 'tag',
+        variants: [
+          { tag: 'a', inner: pick(rng, LEAVES)(rng) },
+          { tag: 'b', inner: pick(rng, LEAVES)(rng) },
+        ],
+      };
     case 'nullable':
       return { t: 'nullable', inner: genDesc(rng, depth - 1) };
     default:
-      return pick(rng, LEAVES)();
+      return pick(rng, LEAVES)(rng);
   }
 }
 
@@ -161,12 +219,28 @@ function buildF(d: Desc): FSchema<unknown> {
     case 'enum': return enum_(d.values);
     case 'upper': return transform(string(), s => s.toUpperCase());
     case 'inc': return transform(number(), n => n + 1);
+    case 'stringC': return string({ minLength: d.minLength, maxLength: d.maxLength });
+    case 'patternC': return string({ pattern: '^[a-z]+$' });
+    case 'numberC': return number({ minimum: d.minimum, maximum: d.maximum });
+    case 'exclusiveC': return number({ exclusiveMinimum: d.gt, exclusiveMaximum: d.lt });
+    case 'multipleC': return number({ multipleOf: d.step });
     case 'default': return default_(string(), d.value) as unknown as FSchema<unknown>;
     case 'nullable': return nullable(buildF(d.inner));
     case 'array': return array(buildF(d.inner));
     case 'record': return record(buildF(d.inner));
     case 'tuple': return tuple(d.items.map(buildF) as [FSchema<unknown>, ...FSchema<unknown>[]]);
     case 'union': return union(d.variants.map(buildF) as [FSchema<unknown>, ...FSchema<unknown>[]]);
+    case 'intersect':
+      return intersect([
+        object({ [d.aKey]: buildF(d.aInner) } as Parameters<typeof object>[0]),
+        object({ [d.bKey]: buildF(d.bInner) } as Parameters<typeof object>[0]),
+      ]);
+    case 'dunion': {
+      const mapping: Record<string, FSchema<unknown>> = {};
+      for (const v of d.variants)
+        mapping[v.tag] = object({ [d.key]: literal(v.tag), v: buildF(v.inner) } as Parameters<typeof object>[0]);
+      return discriminatedUnion(d.key, mapping);
+    }
     case 'object': {
       const props: Record<string, unknown> = {};
       for (const p of d.props) {
@@ -197,12 +271,25 @@ function buildZ(d: Desc): z.ZodTypeAny {
     case 'enum': return z.enum(d.values as [string, ...string[]]);
     case 'upper': return z.string().transform(s => s.toUpperCase());
     case 'inc': return z.number().transform(n => n + 1);
+    case 'stringC': return z.string().min(d.minLength).max(d.maxLength);
+    case 'patternC': return z.string().regex(/^[a-z]+$/);
+    case 'numberC': return z.number().gte(d.minimum).lte(d.maximum);
+    case 'exclusiveC': return z.number().gt(d.gt).lt(d.lt);
+    case 'multipleC': return z.number().multipleOf(d.step);
     case 'default': return z.string().default(d.value);
     case 'nullable': return buildZ(d.inner).nullable();
     case 'array': return z.array(buildZ(d.inner));
     case 'record': return z.record(z.string(), buildZ(d.inner));
     case 'tuple': return z.tuple(d.items.map(buildZ) as [z.ZodTypeAny, ...z.ZodTypeAny[]]);
     case 'union': return z.union(d.variants.map(buildZ) as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
+    case 'intersect':
+      return z.intersection(
+        z.object({ [d.aKey]: buildZ(d.aInner) }).passthrough(),
+        z.object({ [d.bKey]: buildZ(d.bInner) }).passthrough(),
+      );
+    case 'dunion':
+      return z.discriminatedUnion(d.key, d.variants.map(v =>
+        z.object({ [d.key]: z.literal(v.tag), v: buildZ(v.inner) }).passthrough()) as never);
     case 'object': {
       const shape: Record<string, z.ZodTypeAny> = {};
       for (const p of d.props) {
@@ -231,6 +318,12 @@ function genValid(d: Desc, rng: () => number): unknown {
     case 'integer': return randInt(rng, -50, 50);
     case 'boolean': return rng() < 0.5;
     case 'enum': return pick(rng, d.values);
+    // ASCII only — astral length semantics intentionally diverge (header).
+    case 'stringC': return 'a'.repeat(randInt(rng, d.minLength, d.maxLength));
+    case 'patternC': return pick(rng, ['abc', 'zzz', 'q']);
+    case 'numberC': return randInt(rng, d.minimum, d.maximum);
+    case 'exclusiveC': return randInt(rng, d.gt + 1, d.lt - 1);
+    case 'multipleC': return d.step * randInt(rng, -5, 5);
     // `default` agrees with Zod on `undefined` → exercise the fallback path.
     case 'default': return rng() < 0.5 ? undefined : pick(rng, ['x', 'y']);
     case 'nullable': return rng() < 0.3 ? null : genValid(d.inner, rng);
@@ -243,11 +336,25 @@ function genValid(d: Desc, rng: () => number): unknown {
     }
     case 'tuple': return d.items.map(item => genValid(item, rng));
     case 'union': return genValid(pick(rng, d.variants), rng);
+    case 'intersect':
+      return { [d.aKey]: genValid(d.aInner, rng), [d.bKey]: genValid(d.bInner, rng) };
+    case 'dunion': {
+      const variant = pick(rng, d.variants);
+      return { [d.key]: variant.tag, v: genValid(variant.inner, rng) };
+    }
     case 'object': {
       const out: Record<string, unknown> = {};
       for (const p of d.props) {
-        if (p.kind === 'optional' && rng() < 0.4)
-          continue; // omit optional keys sometimes
+        if (p.kind === 'optional') {
+          const roll = rng();
+          if (roll < 0.3)
+            continue; // omit optional keys sometimes
+          if (roll < 0.45) {
+            // explicit `undefined` — both sides treat it as missing.
+            out[p.key] = undefined;
+            continue;
+          }
+        }
         if (p.kind === 'default') {
           if (rng() < 0.5)
             continue; // omit → default applies
@@ -268,6 +375,10 @@ function descHasUnion(d: Desc): boolean {
     case 'array':
     case 'record': return descHasUnion(d.inner);
     case 'tuple': return d.items.some(descHasUnion);
+    case 'intersect': return descHasUnion(d.aInner) || descHasUnion(d.bInner);
+    // dunion is path-comparable: both report the discriminator failure at
+    // [key] and delegate body failures to the matched variant.
+    case 'dunion': return d.variants.some(v => descHasUnion(v.inner));
     case 'object': return d.props.some(p => descHasUnion(p.inner));
     default: return false;
   }
@@ -419,6 +530,120 @@ describe('schema builder parity vs Zod (differential)', () => {
       expect(fr.issues).toBeUndefined();
       if (!fr.issues && zr.success)
         expect(deepEqual(fr.value, zr.data)).toBe(true);
+    }
+  });
+
+  it('constraint boundaries: at-limit and one-off-limit inputs agree with Zod', () => {
+    const cases: Array<{ name: string; f: FSchema<unknown>; z: z.ZodTypeAny; inputs: unknown[] }> = [
+      {
+        name: 'string min/max length (ASCII — astral excluded by design, see header)',
+        f: string({ minLength: 2, maxLength: 4 }),
+        z: z.string().min(2).max(4),
+        inputs: ['a', 'ab', 'abcd', 'abcde', ''],
+      },
+      {
+        name: 'pattern',
+        f: string({ pattern: '^[a-z]+$' }),
+        z: z.string().regex(/^[a-z]+$/),
+        inputs: ['abc', 'ABC', '', 'a1'],
+      },
+      {
+        name: 'inclusive bounds',
+        f: number({ minimum: -3, maximum: 7 }),
+        z: z.number().gte(-3).lte(7),
+        inputs: [-4, -3, 0, 7, 8, 7.0000001],
+      },
+      {
+        name: 'exclusive bounds',
+        f: number({ exclusiveMinimum: 0, exclusiveMaximum: 10 }),
+        z: z.number().gt(0).lt(10),
+        inputs: [0, 0.0001, 9.9999, 10, -1],
+      },
+      {
+        name: 'multipleOf integer step',
+        f: number({ multipleOf: 3 }),
+        z: z.number().multipleOf(3),
+        inputs: [0, 3, -9, 7, 3.5],
+      },
+      {
+        // DOCUMENTED DIVERGENCE: `0.1 + 0.2` (= 0.30000000000000004) is
+        // excluded from the parity inputs — Zod v4 accepts it as a multiple
+        // of 0.1, but the JSON number 0.30000000000000004 divided by 0.1 is
+        // 3.0000000000000004, not an integer, so fetcher's decimal-exact
+        // check rejects it (JSON Schema 2020-12: "division ... results in
+        // an integer"). Fetcher's verdict is pinned separately below.
+        name: 'multipleOf decimal step (agreement zone of both float strategies)',
+        f: number({ multipleOf: 0.1 }),
+        z: z.number().multipleOf(0.1),
+        inputs: [0.3, 0.35, 1.21],
+      },
+      {
+        name: 'multipleOf large magnitude (old relative-tolerance false-accept)',
+        f: number({ multipleOf: 1 }),
+        z: z.number().multipleOf(1),
+        inputs: [10000000000.001, 600000000.5, 600000001],
+      },
+      {
+        name: 'non-finite numbers (both finite-by-default)',
+        f: number(),
+        z: z.number(),
+        inputs: [Infinity, -Infinity, Number.NaN, 1e308, Number('1e999')],
+      },
+      {
+        name: 'integer non-finite / float',
+        f: integer(),
+        z: z.number().int(),
+        inputs: [Infinity, Number.NaN, 1.5, 2, 1.0],
+      },
+    ];
+    for (const c of cases) {
+      const fValidate = c.f['~standard'].validate as (v: unknown) => StandardSchemaV1Result<unknown>;
+      for (const input of c.inputs) {
+        const fOk = !fValidate(input).issues;
+        const zOk = c.z.safeParse(input).success;
+        expect(fOk, `${c.name}: input ${String(input)} fetcher=${fOk} zod=${zOk}`).toBe(zOk);
+      }
+    }
+  });
+
+  it('multipleOf divergence pin: 0.1 + 0.2 is NOT a multiple of 0.1 (decimal-exact; Zod is lenient here)', () => {
+    const f = number({ multipleOf: 0.1 });
+    const r = (f['~standard'].validate as (v: unknown) => StandardSchemaV1Result<unknown>)(0.1 + 0.2);
+    expect(r.issues).toBeDefined();
+  });
+
+  it('optional object key present with explicit undefined agrees with Zod', () => {
+    const f = object({ a: optional(string()) });
+    const zS = z.object({ a: z.string().optional() }).passthrough();
+    const input = { a: undefined };
+    const fr = (f['~standard'].validate as (v: unknown) => StandardSchemaV1Result<unknown>)(structuredClone(input));
+    const zr = zS.safeParse(structuredClone(input));
+    expect(zr.success).toBe(true);
+    expect(fr.issues).toBeUndefined();
+    if (!fr.issues && zr.success)
+      expect(deepEqual(fr.value, zr.data)).toBe(true);
+  });
+
+  it('discriminatedUnion failure paths agree with Zod', () => {
+    const f = discriminatedUnion('tag', {
+      a: object({ tag: literal('a'), v: string() } as unknown as Parameters<typeof object>[0]),
+      b: object({ tag: literal('b'), v: number() } as unknown as Parameters<typeof object>[0]),
+    });
+    const zS = z.discriminatedUnion('tag', [
+      z.object({ tag: z.literal('a'), v: z.string() }).passthrough(),
+      z.object({ tag: z.literal('b'), v: z.number() }).passthrough(),
+    ]);
+    const fValidate = f['~standard'].validate as (v: unknown) => StandardSchemaV1Result<unknown>;
+    for (const input of [{ tag: 'a', v: 1 }, { tag: 'c', v: 1 }, {}, { tag: 'b', v: 2 }]) {
+      const fr = fValidate(structuredClone(input));
+      const zr = zS.safeParse(structuredClone(input));
+      expect(!fr.issues).toBe(zr.success);
+      if (fr.issues && !zr.success) {
+        const fp = fPathSet(fr);
+        const zp = zPathSet(zr.error);
+        for (const p of fp)
+          expect(zp.has(p), `path ${p} reported by fetcher but not Zod`).toBe(true);
+      }
     }
   });
 });

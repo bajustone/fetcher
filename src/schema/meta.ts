@@ -8,8 +8,13 @@
 
 import type { FSchema, Infer } from './types.ts';
 
+/** Type-level-only unique symbol carrying the brand tag. Never exists at runtime. */
 export declare const BRAND: unique symbol;
 
+/**
+ * Nominal-typing helper: `Brand<number, 'UserId'>` is a `number` that does
+ * not assign to `Brand<number, 'OrderId'>`. Produced by {@link brand}.
+ */
 export type Brand<T, B extends string> = T & { readonly [BRAND]: B };
 
 /**
@@ -32,23 +37,28 @@ export function brand<B extends string>(): <S extends FSchema<unknown>>(schema: 
 
 /**
  * Attaches a JSON Schema `description` annotation. Returns a new schema
- * object sharing the same `~standard` (so validation is identical).
+ * object sharing the same `~standard` (so validation is identical). The
+ * original schema stays reachable via the internal `~inner` link, so
+ * annotating a `ref()` before `compile()` does not break ref binding.
  */
 /* @__NO_SIDE_EFFECTS__ */
 export function describe<S extends FSchema<unknown>>(
   schema: S,
   description: string,
 ): S {
-  return { ...schema, description } as S;
+  return { ...schema, 'description': description, '~inner': schema } as S;
 }
 
 /**
- * Attaches a JSON Schema `title` annotation.
+ * Attaches a JSON Schema `title` annotation. Returns a new schema object
+ * sharing the same `~standard` (so validation is identical); like
+ * {@link describe}, the original schema stays reachable via `~inner` so
+ * `compile()` can still bind an annotated `ref()`.
  */
 /* @__NO_SIDE_EFFECTS__ */
 export function title<S extends FSchema<unknown>>(
   schema: S,
   title: string,
 ): S {
-  return { ...schema, title } as S;
+  return { ...schema, title, '~inner': schema } as S;
 }

@@ -724,9 +724,11 @@ describe('createFetch', () => {
   });
 
   // §4.C1 — the Idea 1 invariant says the returned object is a real
-  // Response, so users must be able to mix .result() with native body
-  // methods on the same response in any order. wrapResponse clones
-  // immediately so the original body is preserved for native access.
+  // Response, so users can mix .result() with native body methods on the
+  // same response. The clone is taken LAZILY on the first .result() call
+  // (so unused results never buffer a body copy): .result()-then-native
+  // works in full; native-then-.result() surfaces a structured error
+  // instead of throwing.
   describe('mixed body consumption (§4.C1)', () => {
     it('.result() then .json() — both succeed', async () => {
       const f = createFetch({
@@ -744,7 +746,7 @@ describe('createFetch', () => {
       expect(await response.json()).toEqual({ key: 'value' });
     });
 
-    it('.json() then .result() — both succeed', async () => {
+    it('.json() then .result() — structured error, never a throw', async () => {
       const f = createFetch({
         baseUrl: 'https://api.example.com',
         fetch: mockFetch({ key: 'value' }),
@@ -753,11 +755,16 @@ describe('createFetch', () => {
       const response = await f('/test', { method: 'GET' });
       expect(await response.json()).toEqual({ key: 'value' });
 
-      // .result() reads from the clone, independent of the original
+      // The clone is taken lazily inside .result(); after a native body
+      // read it cannot be taken, and the failure arrives as a structured
+      // error — the never-throws contract holds.
       const result = await response.result();
-      expect(result.ok).toBe(true);
-      if (result.ok)
-        expect(result.data).toEqual({ key: 'value' });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe('network');
+        if (result.error.kind === 'network')
+          expect(String((result.error.cause as Error).message)).toContain('.result() called after');
+      }
     });
 
     it('.result() then .text() — both succeed', async () => {
@@ -853,7 +860,7 @@ describe('createFetch', () => {
       expect(await response.text()).toBe('{"code":"NOT_FOUND"}');
     });
 
-    it('.text() then .result() — error path', async () => {
+    it('.text() then .result() — error path stays never-throws', async () => {
       const f = createFetch({
         baseUrl: 'https://api.example.com',
         fetch: mockFetch({ code: 'NOT_FOUND' }, 404),
@@ -862,12 +869,11 @@ describe('createFetch', () => {
       const response = await f('/missing', { method: 'GET' });
       expect(await response.text()).toBe('{"code":"NOT_FOUND"}');
 
+      // Body already consumed → deterministic structured 'network' error.
       const result = await response.result();
       expect(result.ok).toBe(false);
-      if (!result.ok && result.error.kind === 'http') {
-        expect(result.error.status).toBe(404);
-        expect(result.error.body).toEqual({ code: 'NOT_FOUND' });
-      }
+      if (!result.ok)
+        expect(result.error.kind).toBe('network');
     });
   });
 
@@ -1183,7 +1189,9 @@ describe('.unwrap()', () => {
     catch (err) {
       expect(err).toBeInstanceOf(FetcherRequestError);
       const e = err as FetcherRequestError;
-      expect(e.status).toBe(500);
+      // Response-side validation failure on a 2xx maps to 502 — the
+      // upstream broke its contract; it is not a client (4xx) problem.
+      expect(e.status).toBe(502);
       expect(e.fetcherError.kind).toBe('validation');
     }
   });
@@ -1384,7 +1392,7 @@ describe('.unwrap() error subclasses', () => {
       expect(err).not.toBeInstanceOf(FetcherHTTPError);
       const e = err as FetcherValidationError;
       expect(e.name).toBe('FetcherValidationError');
-      expect(e.status).toBe(500);
+      expect(e.status).toBe(502);
       expect(e.location).toBe('response');
       expect(e.issues.length).toBeGreaterThan(0);
       expect(e.fetcherError.kind).toBe('validation');
@@ -1405,13 +1413,13 @@ describe('.query()', () => {
     expect(typeof descriptor.fn).toBe('function');
   });
 
-  it('key includes method and path', () => {
+  it('key includes method and the full joined URL', () => {
     const f = createFetch({
       baseUrl: 'https://api.test',
       fetch: mockFetch([]),
     });
     const { key } = f.get('/users').query();
-    expect(key).toEqual(['GET', '/users']);
+    expect(key).toEqual(['GET', 'https://api.test/users']);
   });
 
   it('key includes params when present', () => {
@@ -1420,7 +1428,7 @@ describe('.query()', () => {
       fetch: mockFetch({}),
     });
     const { key } = f.get('/users/{id}', { params: { id: '42' } }).query();
-    expect(key).toEqual(['GET', '/users/{id}', { id: '42' }]);
+    expect(key).toEqual(['GET', 'https://api.test/users/{id}', { params: { id: '42' } }]);
   });
 
   it('key includes query when present', () => {
@@ -1429,7 +1437,7 @@ describe('.query()', () => {
       fetch: mockFetch([]),
     });
     const { key } = f.get('/users', { query: { page: 1, limit: 25 } }).query();
-    expect(key).toEqual(['GET', '/users', { page: 1, limit: 25 }]);
+    expect(key).toEqual(['GET', 'https://api.test/users', { query: { page: 1, limit: 25 } }]);
   });
 
   it('key excludes undefined and null query values', () => {
@@ -1440,7 +1448,56 @@ describe('.query()', () => {
     const { key } = f.get('/users', {
       query: { page: 1, filter: undefined, sort: undefined },
     }).query();
-    expect(key).toEqual(['GET', '/users', { page: 1 }]);
+    expect(key).toEqual(['GET', 'https://api.test/users', { query: { page: 1 } }]);
+  });
+
+  it('key includes the body, so two mutations with different payloads never collide', () => {
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: mockFetch({}),
+    });
+    const a = f.post('/users', { body: { name: 'a' } }).query();
+    const b = f.post('/users', { body: { name: 'b' } }).query();
+    expect(a.key).toEqual(['POST', 'https://api.test/users', { body: { name: 'a' } }]);
+    expect(JSON.stringify(a.key)).not.toBe(JSON.stringify(b.key));
+  });
+
+  it('keys from clients forked onto different baseUrls never collide', () => {
+    const f = createFetch({ baseUrl: 'https://api-a.test', fetch: mockFetch([]) });
+    const g = f.with({ baseUrl: 'https://api-b.test' });
+    expect(f.get('/users').query().key).not.toEqual(g.get('/users').query().key);
+  });
+
+  // Regression for the eager-fetch contract violation: .query() must not
+  // dispatch a request, and fn() must perform a FRESH request per call so
+  // cache refetches never replay a memoized first response.
+  it('.query() alone dispatches no request', async () => {
+    let calls = 0;
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: async () => {
+        calls++;
+        return new Response('{}', { headers: { 'content-type': 'application/json' } });
+      },
+    });
+    f.get('/users').query();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(calls).toBe(0);
+  });
+
+  it('fn() performs a fresh request on every invocation (refetch hits the network)', async () => {
+    let calls = 0;
+    const f = createFetch({
+      baseUrl: 'https://api.test',
+      fetch: async () => {
+        calls++;
+        return new Response(JSON.stringify({ n: calls }), { headers: { 'content-type': 'application/json' } });
+      },
+    });
+    const { fn } = f.get('/users').query();
+    expect(await fn()).toEqual({ n: 1 });
+    expect(await fn()).toEqual({ n: 2 });
+    expect(calls).toBe(2);
   });
 
   it('fn() returns data on success', async () => {
@@ -1476,6 +1533,6 @@ describe('.query()', () => {
     });
     const { key } = f.post('/users', { body: {} }).query();
     expect(key[0]).toBe('POST');
-    expect(key[1]).toBe('/users');
+    expect(key[1]).toBe('https://api.test/users');
   });
 });

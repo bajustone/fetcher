@@ -27,7 +27,7 @@ describe('bearerWithRefresh', () => {
           getToken: () => 'token-1',
 
           refresh: async () => 'should-not-refresh',
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
 
@@ -58,7 +58,7 @@ describe('bearerWithRefresh', () => {
             currentToken = 'new-token';
             return 'new-token';
           },
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
 
@@ -91,7 +91,7 @@ describe('bearerWithRefresh', () => {
             refreshCalled = true;
             return 'refreshed';
           },
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
 
@@ -125,7 +125,7 @@ describe('bearerWithRefresh', () => {
             refreshCalled = true;
             return 'new';
           },
-          refreshEndpoint: /\/oauth\/token$/,
+          exclude: /\/oauth\/token$/,
         }),
       ],
 
@@ -152,7 +152,7 @@ describe('bearerWithRefresh', () => {
             refreshCalled = true;
             return 'new';
           },
-          refreshEndpoint: ['/auth/login', '/auth/refresh', '/auth/logout'],
+          exclude: ['/auth/login', '/auth/refresh', '/auth/logout'],
         }),
       ],
       fetch: async () => {
@@ -182,7 +182,7 @@ describe('bearerWithRefresh', () => {
             refreshCalled = true;
             return 'new';
           },
-          refreshEndpoint: req => req.method === 'POST' && req.url.includes('refresh'),
+          exclude: req => req.method === 'POST' && req.url.includes('refresh'),
         }),
       ],
 
@@ -214,7 +214,7 @@ describe('bearerWithRefresh', () => {
               currentToken = 'new';
               resolve('new');
             }, refreshDelay)),
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
 
@@ -256,7 +256,7 @@ describe('bearerWithRefresh', () => {
             refreshCalls++;
             return 'new';
           },
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
 
@@ -294,7 +294,7 @@ describe('bearerWithRefresh', () => {
             currentToken = 'new';
             return 'new';
           },
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
       fetch: async (req) => {
@@ -324,7 +324,7 @@ describe('bearerWithRefresh', () => {
           refresh: async () => {
             throw refreshErr;
           },
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
 
@@ -353,7 +353,7 @@ describe('bearerWithRefresh', () => {
             refreshCalls++;
             return 'new';
           },
-          refreshEndpoint: '/auth/refresh',
+          exclude: '/auth/refresh',
         }),
       ],
 
@@ -404,7 +404,7 @@ describe('bearerWithRefresh', () => {
     expect(authHeaders['/users']).toBe('Bearer my-token');
   });
 
-  it('exclude supersedes refreshEndpoint when both are supplied', async () => {
+  it('exclude accepts a list covering login and refresh endpoints', async () => {
     const authHeaders: Record<string, string | null> = {};
     const f = createFetch({
       baseUrl: 'https://api.example.com',
@@ -412,7 +412,6 @@ describe('bearerWithRefresh', () => {
         bearerWithRefresh({
           getToken: () => 'my-token',
           refresh: async () => 'refreshed',
-          refreshEndpoint: '/auth/refresh',
           exclude: ['/auth/login', '/auth/refresh'],
         }),
       ],

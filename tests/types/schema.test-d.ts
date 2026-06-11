@@ -18,6 +18,7 @@ import {
   array,
   boolean,
   compile,
+  default_,
   discriminatedUnion,
   enum_,
   integer,
@@ -29,6 +30,7 @@ import {
   object,
   optional,
   ref,
+  refined,
   string,
   union,
   unknown,
@@ -216,3 +218,29 @@ type User = Infer<typeof S_user>;
 export type T_user_id = Verify<Equal<User['id'], number>>;
 export type T_user_profile_name = Verify<Equal<User['profile']['name'], string>>;
 export type T_user_profile_bio = Verify<Equal<User['profile']['bio'], string | undefined>>;
+
+// ---------------------------------------------------------------------------
+// v1.0 hardening additions
+// ---------------------------------------------------------------------------
+
+// unknownKeys option is typed and does not change the inferred output type.
+const S_strict = object({ a: string() }, { unknownKeys: 'strict' });
+const S_strip = object({ a: string() }, { unknownKeys: 'strip' });
+const S_pass = object({ a: string() }, { unknownKeys: 'passthrough' });
+export type T_strict = Verify<Equal<Infer<typeof S_strict>, Infer<typeof S_pass>>>;
+export type T_strip = Verify<Equal<Infer<typeof S_strip>['a'], string>>;
+// @ts-expect-error — invalid policy values are rejected.
+const S_badPolicy = object({ a: string() }, { unknownKeys: 'drop' });
+void S_badPolicy;
+
+// refined() accepts both a message string and an options object.
+const S_refMsg = refined(string(), s => s.length > 0, 'empty');
+const S_refOpts = refined(string(), s => s.length > 0, { message: 'empty', code: 'is_empty', path: ['name'] });
+export type T_refMsg = Verify<Equal<Infer<typeof S_refMsg>, string>>;
+export type T_refOpts = Verify<Equal<Infer<typeof S_refOpts>, string>>;
+
+// default_() accepts a value or a factory; output type unchanged.
+const S_defVal = default_(array(string()), []);
+const S_defFn = default_(array(string()), () => []);
+export type T_defVal = Verify<Equal<Infer<typeof S_defVal>, string[]>>;
+export type T_defFn = Verify<Equal<Infer<typeof S_defFn>, string[]>>;

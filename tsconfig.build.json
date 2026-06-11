@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    // Source files import with explicit .ts extensions (JSR style); this
+    // rewrites them to .js in the emitted output so the npm dist is plain
+    // standards-compliant ESM. Requires TypeScript >= 5.7.
+    "rewriteRelativeImportExtensions": true,
+    "noUnusedLocals": true,
+    "stripInternal": true
+  },
+  "include": ["src/**/*.ts"]
+}

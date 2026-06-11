@@ -27,6 +27,34 @@ describe('lintSpec', () => {
     expect(lintSpec({})).toEqual([]);
   });
 
+  it('skips trace operations — the runtime never builds TRACE routes', () => {
+    // Regression: spec-tools walked 'trace' while the runtime adapter
+    // (fromOpenAPI) and the HttpMethod type exclude it, so lintSpec flagged
+    // keywords on schemas the runtime never compiles.
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/t': {
+          trace: {
+            responses: {
+              200: {
+                content: {
+                  'application/json': {
+                    schema: { type: 'array', uniqueItems: true, items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+          get: { responses: { 200: { description: 'ok' } } },
+        },
+      },
+    };
+    // The only unsupported keyword (uniqueItems) lives under the trace
+    // operation, which the runtime never compiles → nothing to report.
+    expect(lintSpec(spec)).toEqual([]);
+  });
+
   it('flags every unsupported keyword in a synthetic spec with the correct pointer', () => {
     const spec = {
       openapi: '3.0.3',
@@ -204,6 +232,32 @@ describe('coverage', () => {
       'GET /pets/{petId}',
       'POST /pets',
     ]);
+  });
+
+  it('skips trace operations — the runtime never builds TRACE routes', () => {
+    // Regression: coverage counted TRACE routes in summary.total and
+    // reported slots for operations fromOpenAPI never builds and the type
+    // layer (LowercaseHttpMethod) never infers.
+    const spec = {
+      openapi: '3.0.3',
+      paths: {
+        '/t': {
+          trace: {
+            responses: {
+              200: { content: { 'application/json': { schema: { type: 'string' } } } },
+            },
+          },
+          get: {
+            responses: {
+              200: { content: { 'application/json': { schema: { type: 'string' } } } },
+            },
+          },
+        },
+      },
+    };
+    const report = coverage(spec);
+    expect(report.routes.map(r => `${r.method} ${r.path}`)).toEqual(['GET /t']);
+    expect(report.summary.total).toBe(1);
   });
 
   it('returns an empty report for an empty/non-object spec', () => {
@@ -615,6 +669,240 @@ describe('coverage', () => {
     const report = coverage(spec);
     const route = report.routes[0]!;
     expect(route.integrityIssues.some(i => i.kind === 'discriminator_mismatch')).toBe(true);
+  });
+});
+
+describe('lintSpec completed keyword table (v1.0 hardening)', () => {
+  it('flags not / uniqueItems / minProperties / maxProperties / contains family / unevaluated*', () => {
+    const spec = {
+      openapi: '3.1.0',
+      components: {
+        schemas: {
+          Strict: {
+            type: 'object',
+            minProperties: 2,
+            maxProperties: 5,
+            unevaluatedProperties: false,
+            properties: {
+              role: { not: { const: 'admin' } },
+              tags: { type: 'array', uniqueItems: true, contains: { type: 'string' }, minContains: 1, maxContains: 3 },
+              tuple: { type: 'array', prefixItems: [{ type: 'string' }], unevaluatedItems: false },
+            },
+          },
+        },
+      },
+      paths: {},
+    };
+
+    const issues = lintSpec(spec);
+    const byKeyword = new Map(issues.map(i => [i.keyword, i]));
+
+    expect(byKeyword.get('not')?.pointer).toBe('#/components/schemas/Strict/properties/role/not');
+    expect(byKeyword.get('not')?.severity).toBe('warn');
+    expect(byKeyword.get('uniqueItems')?.pointer).toBe('#/components/schemas/Strict/properties/tags/uniqueItems');
+    expect(byKeyword.get('uniqueItems')?.severity).toBe('warn');
+    expect(byKeyword.get('minProperties')?.pointer).toBe('#/components/schemas/Strict/minProperties');
+    expect(byKeyword.get('minProperties')?.severity).toBe('warn');
+    expect(byKeyword.get('maxProperties')?.pointer).toBe('#/components/schemas/Strict/maxProperties');
+    expect(byKeyword.get('maxProperties')?.severity).toBe('warn');
+    expect(byKeyword.get('contains')?.pointer).toBe('#/components/schemas/Strict/properties/tags/contains');
+    expect(byKeyword.get('contains')?.severity).toBe('warn');
+    expect(byKeyword.get('minContains')?.severity).toBe('info');
+    expect(byKeyword.get('maxContains')?.severity).toBe('info');
+    expect(byKeyword.get('unevaluatedProperties')?.pointer).toBe('#/components/schemas/Strict/unevaluatedProperties');
+    expect(byKeyword.get('unevaluatedProperties')?.severity).toBe('warn');
+    expect(byKeyword.get('unevaluatedItems')?.pointer).toBe('#/components/schemas/Strict/properties/tuple/unevaluatedItems');
+    expect(byKeyword.get('unevaluatedItems')?.severity).toBe('warn');
+  });
+
+  it('flags content* keywords as info-level annotations', () => {
+    const spec = {
+      openapi: '3.1.0',
+      components: {
+        schemas: {
+          Blob: {
+            type: 'string',
+            contentMediaType: 'application/json',
+            contentEncoding: 'base64',
+            contentSchema: { type: 'object' },
+          },
+        },
+      },
+      paths: {},
+    };
+
+    const issues = lintSpec(spec);
+    for (const keyword of ['contentMediaType', 'contentEncoding', 'contentSchema']) {
+      const issue = issues.find(i => i.keyword === keyword);
+      expect(issue).toBeDefined();
+      expect(issue!.severity).toBe('info');
+      expect(issue!.pointer).toBe(`#/components/schemas/Blob/${keyword}`);
+    }
+  });
+
+  it('flags $dynamicRef (warn) and $anchor / $dynamicAnchor (info)', () => {
+    const spec = {
+      openapi: '3.1.0',
+      components: {
+        schemas: {
+          Dyn: {
+            type: 'object',
+            $anchor: 'dyn',
+            $dynamicAnchor: 'node',
+            properties: { next: { $dynamicRef: '#node' } },
+          },
+        },
+      },
+      paths: {},
+    };
+
+    const issues = lintSpec(spec);
+    expect(issues.find(i => i.keyword === '$dynamicRef')?.severity).toBe('warn');
+    expect(issues.find(i => i.keyword === '$anchor')?.severity).toBe('info');
+    expect(issues.find(i => i.keyword === '$dynamicAnchor')?.severity).toBe('info');
+  });
+
+  it('coverage aggregates the new keywords into unsupportedKeywords', () => {
+    const spec = {
+      openapi: '3.1.0',
+      paths: {
+        '/u': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    minProperties: 1,
+                    properties: {
+                      role: { not: { const: 'admin' } },
+                      tags: { type: 'array', uniqueItems: true, contains: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const report = coverage(spec);
+    const route = report.routes[0]!;
+    expect(route.unsupportedKeywords).toEqual(['contains', 'minProperties', 'not', 'uniqueItems']);
+  });
+
+  // Differential guard: walk every JSON Schema 2020-12 validation/applicator
+  // keyword and assert each one is either ENFORCED by the runtime converter
+  // (from-json-schema.ts) or flagged by lintSpec. If the runtime ever gains
+  // or loses keyword support, or 2020-12 keywords are added here, this test
+  // forces the lint table to keep up — lintSpec's CI-gate contract is "no
+  // silent type/runtime drift".
+  it('differential: every 2020-12 keyword is either enforced or flagged', () => {
+    // Keywords the runtime converter consumes (see from-json-schema.ts
+    // pickStringOpts / pickNumberOpts / pickArrayOpts + convert()), plus
+    // pure-annotation keywords that cannot drift because they assert nothing.
+    const ENFORCED_OR_ANNOTATION = new Set([
+      'type',
+      'enum',
+      'const',
+      'minLength',
+      'maxLength',
+      'pattern',
+      'minimum',
+      'maximum',
+      'minItems',
+      'maxItems',
+      'properties',
+      'required',
+      'items',
+      'oneOf',
+      'anyOf',
+      'allOf',
+      'additionalProperties', // `false` form enforced; sub-schema form special-cased below
+      '$ref',
+      '$defs',
+      'discriminator',
+      'title',
+      'description',
+      'default',
+      'deprecated',
+      'readOnly',
+      'writeOnly',
+      'examples',
+      '$comment',
+    ]);
+
+    // One minimal usage per 2020-12 validation / applicator / core keyword.
+    const KEYWORD_USAGES: Record<string, object> = {
+      type: { type: 'string' },
+      enum: { enum: ['a'] },
+      const: { const: 'a' },
+      multipleOf: { type: 'number', multipleOf: 2 },
+      maximum: { type: 'number', maximum: 1 },
+      exclusiveMaximum: { type: 'number', exclusiveMaximum: 1 },
+      minimum: { type: 'number', minimum: 0 },
+      exclusiveMinimum: { type: 'number', exclusiveMinimum: 0 },
+      maxLength: { type: 'string', maxLength: 3 },
+      minLength: { type: 'string', minLength: 1 },
+      pattern: { type: 'string', pattern: '^a' },
+      maxItems: { type: 'array', maxItems: 3 },
+      minItems: { type: 'array', minItems: 1 },
+      uniqueItems: { type: 'array', uniqueItems: true },
+      maxContains: { type: 'array', contains: { type: 'string' }, maxContains: 2 },
+      minContains: { type: 'array', contains: { type: 'string' }, minContains: 1 },
+      contains: { type: 'array', contains: { type: 'string' } },
+      maxProperties: { type: 'object', maxProperties: 3 },
+      minProperties: { type: 'object', minProperties: 1 },
+      required: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+      dependentRequired: { type: 'object', dependentRequired: { a: ['b'] } },
+      properties: { type: 'object', properties: { a: { type: 'string' } } },
+      patternProperties: { type: 'object', patternProperties: { '^x-': { type: 'string' } } },
+      additionalProperties: { type: 'object', additionalProperties: false },
+      propertyNames: { type: 'object', propertyNames: { pattern: '^[a-z]+$' } },
+      items: { type: 'array', items: { type: 'string' } },
+      prefixItems: { type: 'array', prefixItems: [{ type: 'string' }] },
+      allOf: { allOf: [{ type: 'object' }] },
+      anyOf: { anyOf: [{ type: 'object' }] },
+      oneOf: { oneOf: [{ type: 'object' }] },
+      not: { not: { type: 'null' } },
+      if: { if: { type: 'object' } },
+      then: { if: { type: 'object' }, then: { required: [] } },
+      else: { if: { type: 'object' }, else: { required: [] } },
+      dependentSchemas: { type: 'object', dependentSchemas: { a: { required: ['b'] } } },
+      unevaluatedItems: { type: 'array', unevaluatedItems: false },
+      unevaluatedProperties: { type: 'object', unevaluatedProperties: false },
+      format: { type: 'string', format: 'email' },
+      contentEncoding: { type: 'string', contentEncoding: 'base64' },
+      contentMediaType: { type: 'string', contentMediaType: 'application/json' },
+      contentSchema: { type: 'string', contentMediaType: 'application/json', contentSchema: { type: 'object' } },
+      $anchor: { type: 'object', $anchor: 'a' },
+      $dynamicAnchor: { type: 'object', $dynamicAnchor: 'a' },
+      $dynamicRef: { $dynamicRef: '#a' },
+      $id: { type: 'object', $id: 'https://example.com/s' },
+      $schema: { type: 'object', $schema: 'https://json-schema.org/draft/2020-12/schema' },
+    };
+
+    const schemas: Record<string, object> = {};
+    for (const [keyword, usage] of Object.entries(KEYWORD_USAGES))
+      schemas[`Uses_${keyword.replace('$', 'dollar_')}`] = usage;
+
+    const issues = lintSpec({ openapi: '3.1.0', components: { schemas }, paths: {} });
+    const flagged = new Set(issues.map(i => i.keyword));
+
+    const unaccounted = Object.keys(KEYWORD_USAGES).filter(
+      keyword => !ENFORCED_OR_ANNOTATION.has(keyword) && !flagged.has(keyword),
+    );
+    expect(unaccounted).toEqual([]);
+  });
+
+  it('differential: the sub-schema form of additionalProperties is still flagged', () => {
+    const issues = lintSpec({
+      openapi: '3.1.0',
+      components: { schemas: { Open: { type: 'object', additionalProperties: { type: 'string' } } } },
+      paths: {},
+    });
+    expect(issues.some(i => i.keyword === 'additionalProperties')).toBe(true);
   });
 });
 

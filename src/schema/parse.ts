@@ -23,7 +23,9 @@ import { formatIssues } from './format-issues.ts';
  * {@link formatIssues}.
  */
 export class SchemaValidationError extends Error {
+  /** The raw Standard Schema V1 issue list from the failed validation. */
   readonly issues: ReadonlyArray<StandardSchemaV1Issue>;
+  /** Builds the error from an issue list; `message` is the `formatIssues` rendering of it. */
   constructor(issues: ReadonlyArray<StandardSchemaV1Issue>) {
     super(formatIssues(issues));
     this.name = 'SchemaValidationError';
@@ -98,7 +100,11 @@ export function parseOrThrow<T>(
 export function groupIssuesByField(
   issues: ReadonlyArray<StandardSchemaV1Issue>,
 ): Record<string, string> {
-  const out: Record<string, string> = {};
+  // Null-prototype accumulator: fields named like Object.prototype members
+  // ('toString', 'constructor', '__proto__') must collect their messages as
+  // ordinary own entries instead of being shadowed (or, for '__proto__',
+  // triggering the prototype setter).
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const issue of issues) {
     const first = issue.path?.[0];
     let key: string;
@@ -111,7 +117,7 @@ export function groupIssuesByField(
     else {
       key = String(first);
     }
-    if (!(key in out))
+    if (!Object.hasOwn(out, key))
       out[key] = issue.message;
   }
   return out;
