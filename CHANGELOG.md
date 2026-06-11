@@ -1,5 +1,142 @@
 # Changelog
 
+## [1.0.0] - Unreleased
+
+Hardening release. The API surface is the one you know; a pre-release audit
+drove deliberate behavior corrections across the request/response data plane.
+The exhaustive list of every observable change is in
+[`docs/migration-1.0.md`](./docs/migration-1.0.md) — this section is the
+summary.
+
+### Breaking
+
+- **Lazy dispatch.** Requests fire on the first `await` / `.then()` /
+  `.result()` / `.unwrap()`, not at call time. `.query()` alone dispatches
+  nothing, and the descriptor's `fn()` performs a fresh request per
+  invocation — TanStack Query / SWR refetches actually refetch (previously
+  they replayed a permanently memoized first response).
+- **`QueryDescriptor.key` shape changed** to `[method, fullUrl, inputs?]`
+  where `inputs` bundles `{ params?, query?, body? }`. Keys now distinguish
+  clients with different `baseUrl`s and mutations with different bodies.
+  Persisted query caches invalidate once on upgrade.
+- **`FetcherError.kind` grew two kinds** — now
+  `'network' | 'timeout' | 'aborted' | 'validation' | 'http'`. Caller-signal
+  cancellations are `'aborted'`; `timeout()`/`TimeoutError` aborts are
+  `'timeout'` (both were `'network'`). Update exhaustive `switch` statements.
+- **`FetcherRequestError.status` mapping changed**: request-side validation
+  → 400 (was 500); response-side validation → the response's error status,
+  or 502 when it was a 2xx (was 500); timeout → 408; aborted → 499.
+- **`retry()` no longer retries `POST`/`PATCH` by default** — only RFC 9110
+  idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`, `TRACE`).
+  Opt in via `retry: { methods: ['GET', 'POST'] }`. Also: `Retry-After` is
+  capped at `maxRetryAfter` (default `maxBackoff`); fractional/negative
+  `Retry-After` ignored; `attempts` clamped to ≥ 1 (`retry: 0` previously
+  sent zero requests).
+- **Query serialization corrected**: arrays → repeated keys (`ids=1&ids=2`,
+  was comma-joined), `Date` → ISO 8601 (was locale-dependent), plain-object
+  values → `validation` error (was `[object Object]`), a path already
+  containing `?` merges with `&`.
+- **`.result()` ordering contract**: the body clone is taken lazily on the
+  first `.result()` call. Call `.result()` before native body reads; the
+  reverse returns a structured error instead of working by accident.
+- **A non-JSON 2xx with a declared `response` schema is validated** instead
+  of silently bypassing the schema.
+- **A route's declared `body` schema runs even when the body is omitted** —
+  a forgotten required body is a `validation` error, not an empty request.
+  Schemas for optional bodies must accept `undefined` (`fromOpenAPI` handles
+  this automatically for `requestBody.required: false`).
+- **`timeout()` aborts with a `TimeoutError` `DOMException`** (the old JSDoc
+  claimed `AbortError`), surfacing as `kind: 'timeout'`.
+- **Removed:** the deprecated `refreshEndpoint` option on `bearerWithRefresh`
+  (use `exclude`); the internal OAS type-plumbing exports (`FilterKeys`,
+  `MediaType`, `IsTypedCall`, `AvailablePaths`/`AvailableMethods`, the
+  `Resolve*For`/`Resolve*FromPaths` family, `OpenAPIPaths`,
+  `OpenAPI*Status`). The documented type surface is unchanged.
+
+### Fixed
+
+- URL joining: a trailing-slash `baseUrl` no longer produces `//`; a missing
+  slash no longer corrupts the host; an absolute-URL path is used as-is.
+- A path template whose params are omitted is a `validation` error instead
+  of sending the literal `{id}`.
+- `Uint8Array` (any ArrayBuffer view) and `ReadableStream` bodies pass
+  through to the wire untouched (previously `JSON.stringify`'d into
+  garbage); stream bodies get `duplex: 'half'`.
+- The **validated output** of body/params/query schemas is what gets sent —
+  Standard Schema transforms and defaults now apply to the wire.
+- `application/problem+json` and other `*+json` content types parse as JSON.
+- The HTTP status is never lost: malformed-JSON error bodies surface as
+  `kind: 'http'` with the raw text; response-side validation errors carry
+  `status`; empty error bodies keep their status.
+- An empty 2xx body resolves `ok: true` with `data: undefined`; invalid
+  JSON on a 2xx is a `validation` error with code `'invalid_json'`
+  (both previously `kind: 'network'`).
+- Lowercase `method: 'post'` hits the same route definition and validation
+  as `'POST'`.
+- `timeout()` no longer uses `AbortSignal.any` (broken/missing on several
+  claimed runtimes; Node leak nodejs/node#54614), clears its timer on
+  settle, and removes user-signal listeners — no leak with long-lived
+  signals.
+- `exclude` matchers match when `baseUrl` carries a path prefix and support
+  OpenAPI `{param}` templates.
+- `bearerWithRefresh`/`cookieAuth`: staggered 401s within one expiry burst
+  reuse the fresh token/cookie instead of each triggering another refresh;
+  discarded responses (retries, 401 replays) have their bodies cancelled.
+- `parseSetCookie` honors deletions (`Max-Age=0` / past `Expires`, RFC
+  6265bis precedence rules).
+- OpenAPI runtime: operation-level `$ref`s and shared path-item `parameters`
+  are resolved (routes that silently lost validation now validate); a
+  `default` response is consistently the error catch-all in the runtime,
+  type layer, and spec-tools; integer path/query params coerce numeric
+  strings and accept `string | number` at the type level.
+- Schema engine: `number()`/`integer()` reject `±Infinity`; string lengths
+  count Unicode code points; `object()` accepts optional keys present as
+  `undefined`; `union()` failures report the best-matching variant's issues
+  with paths; `compile()` reaches refs nested anywhere;
+  `transform`/`refined`/`default_` over `optional()` keep both behaviors
+  inside `object()`; async schemas inside sync combinators throw `TypeError`
+  instead of corrupting output; `default_` clones object/array fallbacks per
+  use; format validators tightened (HTML5 email, range-checked date/time,
+  flag-consistent patterns); `multipleOf` exact for large magnitudes.
+
+### Added
+
+- `f.head()` / `f.options()` shortcuts; `HttpMethod` includes
+  `HEAD`/`OPTIONS`.
+- Method shortcuts make `options` required at the type level when the route
+  declares a body or the path has `{params}` — a missing body/params is a
+  compile error.
+- `FetcherTimeoutError` (408), `FetcherAbortError` (499),
+  `FetcherNetworkError`, `FetcherValidationError`, and `FetcherHTTPError` —
+  `instanceof`-narrowable subclasses thrown by `.unwrap()`.
+- `querySerializer` option (global and per-call) for custom query encodings.
+- `object()` gains `unknownKeys: 'passthrough' | 'strip' | 'strict'`.
+- `refined()` accepts an options object `{ message, code, path }`.
+- `default_()` accepts a factory function; object/array fallbacks are cloned
+  per use.
+- `discriminatedUnion()` supports number/boolean tags.
+- `inline()` gains `onUnresolved: 'throw' | 'keep'` and throws typed
+  `InlineCycleError` / `InlineUnresolvedRefError`.
+- Vite plugin `fetchTimeoutMs` option for remote spec fetches.
+- Zero-codegen OpenAPI inference works end-to-end: an `as const` spec +
+  `fromOpenAPI` produces typed `result.data` / `body` / `error.body` at call
+  sites with no codegen (`InferredRouteDefinition` slots are required when
+  declared; `fromOpenAPI`'s input constraint loosened so literal specs pass).
+
+### Packaging
+
+- **npm is first-class**: compiled ESM + `.d.ts` (+ source maps and
+  `declarationMap`) under `dist/`, validated by publint and
+  arethetypeswrong in CI. JSR continues to ship raw TypeScript source.
+- ESM-only; `engines.node >= 20.19`. Node 18 is EOL and no longer claimed.
+- CI proves the runtime matrix: Node 20.19/22/24, Deno, and Bun run a
+  conformance smoke (`scripts/smoke.mjs`) against the built artifact on
+  every push; bundle-size budgets enforced by `scripts/check-size.ts`
+  (tree-shaken core ~4.0 kB gzipped).
+- New `SECURITY.md`: vulnerability reporting, security guarantees and their
+  boundaries, and the 0.x support window (critical security fixes for 6
+  months after 1.0.0).
+
 ## [0.10.0] - 2026-06-08
 
 ### Fixed

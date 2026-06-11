@@ -19,7 +19,7 @@
 /* eslint-disable unused-imports/no-unused-vars, ts/explicit-function-return-type */
 
 import type { ResolveParamsFromPaths, ResolveQueryFromPaths, ResultData, SchemaOf, TypedResponse } from '../../src/types.ts';
-import type { components } from '../fixtures/petstore-paths.d.ts';
+import type { components, components as realComponents, paths as realPaths } from '../fixtures/petstore-paths.d.ts';
 import { createFetch } from '../../src/fetcher.ts';
 
 // ---------------------------------------------------------------------------
@@ -317,3 +317,112 @@ function listPetsWithQuery() {
   return f('/pets', { method: 'GET', query: { limit: 5 } });
 }
 void listPetsWithQuery;
+
+// ---------------------------------------------------------------------------
+// Real codegen output — the same assertions against the actual
+// openapi-typescript output for tests/fixtures/petstore.json. Unlike the
+// hand-rolled interface above, the real fixture emits `put?: never`-style
+// phantom markers for undeclared verbs and routes operations through the
+// `operations[...]` indirection, so these cases exercise the
+// DefinedMethodKeys filtering that the hand-rolled shape cannot.
+// ---------------------------------------------------------------------------
+
+const rf = createFetch<realPaths>({ baseUrl: 'https://api.example.com' });
+
+type RealPet = realComponents['schemas']['Pet'];
+type RealError = realComponents['schemas']['Error'];
+
+function realGetPetById() {
+  return rf('/pets/{petId}', { method: 'GET', params: { petId: '42' } });
+}
+function realListPets() {
+  return rf('/pets', { method: 'GET' });
+}
+
+/** Real fixture: GET /pets/{petId} → Pet, no declared error → unknown. */
+export type Case_Real_GetPet = Verify<
+  Equal<Awaited<ReturnType<typeof realGetPetById>>, TypedResponse<RealPet, unknown>>
+>;
+
+/** Real fixture: GET /pets → Pet[], `default` → Error on the error side. */
+export type Case_Real_ListPets = Verify<
+  Equal<Awaited<ReturnType<typeof realListPets>>, TypedResponse<RealPet[], RealError>>
+>;
+
+/**
+ * Real fixture: `put?: never` phantom marker on /pets must NOT count as a
+ * typed method — a PUT call falls through to the untyped branch instead of
+ * resolving against a phantom operation.
+ */
+function realPutFallsBack() {
+  return rf('/pets', { method: 'PUT' });
+}
+export type Case_Real_PutFallsBack = Verify<
+  Equal<Awaited<ReturnType<typeof realPutFallsBack>>, TypedResponse<unknown>>
+>;
+
+// ---------------------------------------------------------------------------
+// Negative assertions (input side): wrong or missing bodies/params must be
+// compile errors. Each @ts-expect-error doubles as a regression tripwire —
+// if the input types ever widen to any/unknown, tsc reports the directive
+// as unused and the typecheck fails.
+// ---------------------------------------------------------------------------
+
+function _negRealMissingBody() {
+  // @ts-expect-error — POST /pets declares a required JSON body
+  return rf('/pets', { method: 'POST' });
+}
+
+function _negRealWrongBodyFieldType() {
+  // @ts-expect-error — Pet.id is a number, not a string
+  return rf('/pets', { method: 'POST', body: { id: 'wrong', name: 'Rex' } });
+}
+
+function _negRealExtraBodyField() {
+  // @ts-expect-error — `bogus` is not a property of Pet
+  return rf('/pets', { method: 'POST', body: { id: 1, name: 'Rex', bogus: true } });
+}
+
+function _negRealMissingParams() {
+  // @ts-expect-error — /pets/{petId} requires `params`
+  return rf('/pets/{petId}', { method: 'GET' });
+}
+
+function _negRealWrongParamsType() {
+  // @ts-expect-error — petId is declared as a string in the spec
+  return rf('/pets/{petId}', { method: 'GET', params: { petId: { bad: true } } });
+}
+
+function _negRealWrongQueryType() {
+  // @ts-expect-error — limit is a number, not a string
+  return rf('/pets', { method: 'GET', query: { limit: 'ten' } });
+}
+
+function _negRealShortcutRequiresOptions() {
+  // @ts-expect-error — the POST shortcut requires options when the body is required
+  return rf.post('/pets');
+}
+
+function _negRealShortcutParamsRequired() {
+  // @ts-expect-error — the GET shortcut requires options when the path has {petId}
+  return rf.get('/pets/{petId}');
+}
+
+void _negRealMissingBody;
+void _negRealWrongBodyFieldType;
+void _negRealExtraBodyField;
+void _negRealMissingParams;
+void _negRealWrongParamsType;
+void _negRealWrongQueryType;
+void _negRealShortcutRequiresOptions;
+void _negRealShortcutParamsRequired;
+
+// Input-side structural assertion: the resolved body type for POST /pets is
+// exactly Pet (catches silent widening to any/unknown even where a call
+// would still compile).
+export type Case_Real_BodyType = Verify<
+  Equal<
+    import('../../src/types.ts').ResolveBodyFromPaths<realPaths, '/pets', 'POST'>,
+    RealPet
+  >
+>;

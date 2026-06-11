@@ -42,7 +42,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { inline } from './inline.ts';
+import { inline, InlineCycleError } from './inline.ts';
 import { extractComponentSchemas, extractRouteSchemas } from './openapi.ts';
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,12 @@ export interface FetcherPluginOptions {
    * `spec` file, and only errors if neither exists.
    */
   url?: string;
+  /**
+   * Milliseconds before a remote spec fetch (the `url` option) is aborted.
+   * Defaults to `30_000`. A timed-out fetch follows the same fallback chain
+   * as any other fetch failure: cached copy → local `spec` file → error.
+   */
+  fetchTimeoutMs?: number;
   /**
    * Whether to expose `schemas` and `validators` exports from the virtual
    * modules.
@@ -147,7 +153,18 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
     const { mtimeMs } = statSync(path);
     if (specCache && specCache.path === path && specCache.mtimeMs === mtimeMs)
       return specCache.parsed;
-    const parsed = JSON.parse(readFileSync(path, 'utf-8'));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, 'utf-8'));
+    }
+    catch (err) {
+      // Name the offending file — a bare SyntaxError ("Unexpected token }
+      // in JSON at position 1234") is useless in the Vite overlay and in
+      // CI logs when the user is mid-edit on the spec.
+      throw new Error(
+        `[fetcher] ${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     specCache = { path, mtimeMs, parsed };
     return parsed;
   }
@@ -158,27 +175,41 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
     // If a remote URL is configured, fetch into the cache file — never the
     // user's source spec. Fall back (cache → local → error) on failure.
     if (options.url) {
+      const fetchTimeoutMs = options.fetchTimeoutMs ?? 30_000;
       try {
-        const response = await globalThis.fetch(options.url);
+        // Without a timeout, a spec server that accepts the connection but
+        // never responds hangs buildStart forever (the catch-based fallback
+        // chain below is unreachable while the request is pending).
+        const response = await globalThis.fetch(options.url, {
+          signal: AbortSignal.timeout(fetchTimeoutMs),
+        });
         if (!response.ok)
           throw new Error(`HTTP ${response.status}`);
         const body = await response.text();
         JSON.parse(body); // Validate JSON before caching
-        writeFileSync(cachePath, body);
+        // Skip the write when the content is unchanged: rewriting bumps the
+        // cache file's mtime, which would needlessly invalidate the
+        // mtime-keyed specCache and re-trigger Rollup watch-mode builds
+        // (buildStart registers the cache file via addWatchFile).
+        if (!existsSync(cachePath) || readFileSync(cachePath, 'utf-8') !== body)
+          writeFileSync(cachePath, body);
         activeSpecPath = cachePath;
       }
       catch (err) {
+        const reason = err instanceof Error && err.name === 'TimeoutError'
+          ? `timed out after ${fetchTimeoutMs}ms`
+          : String(err);
         if (existsSync(cachePath)) {
           activeSpecPath = cachePath;
-          console.warn(`[fetcher] Failed to fetch spec from ${options.url}, using cached copy at ${cachePath}: ${err}`);
+          console.warn(`[fetcher] Failed to fetch spec from ${options.url} (${reason}), using cached copy at ${cachePath}`);
         }
         else if (existsSync(specPath)) {
           activeSpecPath = specPath;
-          console.warn(`[fetcher] Failed to fetch spec from ${options.url}, using local file ${spec}: ${err}`);
+          console.warn(`[fetcher] Failed to fetch spec from ${options.url} (${reason}), using local file ${spec}`);
         }
         else {
           throw new Error(
-            `[fetcher] Failed to fetch spec from ${options.url} and no cached or local file exists: ${err}`,
+            `[fetcher] Failed to fetch spec from ${options.url} (${reason}) and no cached or local file exists.`,
           );
         }
       }
@@ -205,12 +236,51 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
     emitEnvDeclaration(envDtsPath, emitComponents, componentNames);
   }
 
+  // Single-flight regeneration: at most one generate() runs at a time.
+  // A call arriving while a run is in flight gets one queued follow-up run
+  // (shared by every caller that arrives during the same in-flight run);
+  // the follow-up re-reads the spec, so the latest save wins. Without this,
+  // a spec save landing while a slow generate() is in flight (e.g. a remote
+  // `url` fetch) would start a second, concurrent generate() — interleaving
+  // writeFileSync calls to paths.d.ts / fetcher-env.d.ts, racing on
+  // specCache, and potentially letting the stale run finish last.
+  let inFlight: Promise<void> | null = null;
+  let queued: Promise<void> | null = null;
+  function generateSerial(): Promise<void> {
+    if (inFlight) {
+      queued ??= inFlight
+        .catch(() => { /* follow-up runs regardless of the in-flight run's outcome */ })
+        .then(() => {
+          queued = null;
+          return generateSerial();
+        });
+      return queued;
+    }
+    inFlight = generate().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
+  }
+
   return {
     name: 'fetcher',
 
     // Rollup hook: runs once at the start of each build.
-    async buildStart() {
-      await generate();
+    async buildStart(this: RollupPluginContext | undefined) {
+      await generateSerial();
+      // Register the spec with Rollup's watcher so `rollup --watch` /
+      // `vite build --watch` re-run the build when it changes — the
+      // configureServer watcher below only covers the Vite dev server.
+      // (Guarded: unit tests call this hook without a plugin context.)
+      if (this && typeof this.addWatchFile === 'function') {
+        this.addWatchFile(specPath);
+        // For remote specs, generation reads from the cache file; watch it
+        // too so a refreshed download triggers a rebuild. generate() skips
+        // rewriting the cache when the fetched content is unchanged, so
+        // this does not loop the watcher.
+        if (options.url && existsSync(cachePath))
+          this.addWatchFile(cachePath);
+      }
     },
 
     // Rollup hook: intercept `import 'virtual:fetcher'` and
@@ -257,15 +327,18 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
         if (resolve(changedPath) !== specPath)
           return;
 
-        // Debounce rapid saves so overlapping generate() calls don't race on
-        // the writeFileSync to paths.d.ts.
+        // Debounce rapid saves to coalesce change-event bursts into one
+        // regeneration. Note the debounce alone does NOT prevent overlap —
+        // once a (potentially slow) generate() is in flight, a later save
+        // would start a concurrent one; generateSerial() is what guarantees
+        // runs never overlap.
         if (debounce)
           clearTimeout(debounce);
         debounce = setTimeout(async () => {
           // Force a re-parse: the source file changed under us.
           specCache = null;
           try {
-            await generate();
+            await generateSerial();
             // Invalidate both virtual modules so Vite serves fresh code.
             for (const moduleId of [RESOLVED_VIRTUAL_ID, RESOLVED_INLINED_ID]) {
               const mod = server.moduleGraph.getModuleById(moduleId);
@@ -290,6 +363,21 @@ export function fetcherPlugin(options: FetcherPluginOptions): any {
 // ---------------------------------------------------------------------------
 
 /**
+ * Serializes a value for embedding in generated module source, as a
+ * `JSON.parse('…')` call rather than a bare object literal. In an object
+ * literal, a string-literal `"__proto__"` key sets the object's
+ * [[Prototype]] instead of defining an own property (ECMA-262 B.3.1), so a
+ * schema property or component literally named `__proto__` would silently
+ * vanish from the reconstructed data — a validation bypass the hardened
+ * runtime path (`fromOpenAPI`) does not have. `JSON.parse` uses
+ * CreateDataProperty semantics, which always defines an own key. (It also
+ * parses faster than an object literal for large payloads.)
+ */
+function emitJSON(value: unknown): string {
+  return `JSON.parse(${JSON.stringify(JSON.stringify(value))})`;
+}
+
+/**
  * Emits the source for `virtual:fetcher` — the spec-canonical module exposing
  * `routes`, and (when `emitComponents` is true) `schemas` and `validators`.
  * `schemas.X` retains local `$defs` + `$ref`; `validators.X` resolves those
@@ -300,8 +388,8 @@ function buildCanonicalModule(rawSpec: unknown, emitComponents: boolean): string
 
   const parts: string[] = [
     `import { fromJSONSchema } from '@bajustone/fetcher/openapi';`,
-    `const __defs = ${JSON.stringify(definitions)};`,
-    `const __routes = ${JSON.stringify(routes)};`,
+    `const __defs = ${emitJSON(definitions)};`,
+    `const __routes = ${emitJSON(routes)};`,
     `function __buildRoutes(extracted, defs) {`,
     `  const r = {};`,
     `  for (const [path, methods] of Object.entries(extracted)) {`,
@@ -322,10 +410,12 @@ function buildCanonicalModule(rawSpec: unknown, emitComponents: boolean): string
   if (emitComponents) {
     const { schemas } = extractComponentSchemas(rawSpec as Parameters<typeof extractComponentSchemas>[0]);
     parts.push(
-      `const __components = ${JSON.stringify(schemas)};`,
+      `const __components = ${emitJSON(schemas)};`,
       `export const schemas = Object.freeze(__components);`,
       `const __validatorCache = Object.create(null);`,
-      `const __validatorDescriptors = {};`,
+      // Null prototype: a component literally named '__proto__' must land as
+      // an own descriptor key, not clobber the descriptors object's prototype.
+      `const __validatorDescriptors = Object.create(null);`,
       `for (const __name of Object.keys(__components)) {`,
       `  __validatorDescriptors[__name] = {`,
       `    enumerable: true,`,
@@ -347,27 +437,40 @@ function buildCanonicalModule(rawSpec: unknown, emitComponents: boolean): string
 /**
  * Emits the source for `virtual:fetcher/inlined` — the fully-flattened
  * `schemas` export. Acyclic components are pre-inlined at plugin time;
- * cyclic components emit as throwing getters.
+ * components that cannot be inlined (cyclic, or carrying a `$ref` the
+ * bundler could not resolve) emit as throwing getters whose message names
+ * the actual failure.
  */
 function buildInlinedModule(rawSpec: unknown): string {
   const { schemas } = extractComponentSchemas(rawSpec as Parameters<typeof extractComponentSchemas>[0]);
 
-  const inlinedAcyclic: Record<string, unknown> = {};
+  // Null prototypes: component names are spec-controlled, and assigning a
+  // key literally named '__proto__' on a plain `{}` would set the prototype
+  // instead of an own property, silently dropping that component.
+  const inlinedAcyclic: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   const cyclicNames: string[] = [];
+  // name → reason, for non-cyclic inline failures (e.g. unresolvable $ref).
+  const failedReasons: Record<string, string> = Object.create(null) as Record<string, string>;
 
   for (const [name, schema] of Object.entries(schemas)) {
     try {
       inlinedAcyclic[name] = inline(schema);
     }
-    catch {
-      cyclicNames.push(name);
+    catch (err) {
+      if (err instanceof InlineCycleError)
+        cyclicNames.push(name);
+      else
+        failedReasons[name] = err instanceof Error ? err.message : String(err);
     }
   }
 
   return [
-    `const __inlined = ${JSON.stringify(inlinedAcyclic)};`,
-    `const __cyclic = ${JSON.stringify(cyclicNames)};`,
-    `const __descriptors = {};`,
+    `const __inlined = ${emitJSON(inlinedAcyclic)};`,
+    `const __cyclic = ${emitJSON(cyclicNames)};`,
+    `const __failed = ${emitJSON(failedReasons)};`,
+    // Null prototype — same '__proto__'-component reasoning as the canonical
+    // module's __validatorDescriptors.
+    `const __descriptors = Object.create(null);`,
     `for (const __name of Object.keys(__inlined)) {`,
     `  __descriptors[__name] = { enumerable: true, value: __inlined[__name] };`,
     `}`,
@@ -378,6 +481,17 @@ function buildInlinedModule(rawSpec: unknown): string {
     `      throw new Error(`,
     `        "schemas." + __name + " is recursive and cannot be inlined. " +`,
     `        "Import it from 'virtual:fetcher' (ref-aware) or use validators." + __name + " (also from 'virtual:fetcher')."`,
+    `      );`,
+    `    },`,
+    `  };`,
+    `}`,
+    `for (const __name of Object.keys(__failed)) {`,
+    `  __descriptors[__name] = {`,
+    `    enumerable: true,`,
+    `    get() {`,
+    `      throw new Error(`,
+    `        "schemas." + __name + " could not be inlined: " + __failed[__name] + " " +`,
+    `        "Import it from 'virtual:fetcher' (ref-aware) instead."`,
     `      );`,
     `    },`,
     `  };`,
@@ -395,7 +509,21 @@ function buildInlinedModule(rawSpec: unknown): string {
 async function runOpenAPITypeScript(spec: unknown, outputPath: string): Promise<void> {
   let openapiTS: (schema: unknown) => Promise<string>;
   try {
-    const mod = await import('openapi-typescript');
+    // IMPORTANT — the specifier is routed through a variable, NOT written as
+    // a literal `import('openapi-typescript')`. JSR's publisher statically
+    // analyzes the module graph (deno_graph follows literal dynamic imports
+    // too), resolves the bare specifier against package.json, and bakes it
+    // into the published manifest as a *hard* runtime dependency — which
+    // forced every consumer to install openapi-typescript plus its
+    // ~30-package transitive tree even if they never touch the Vite plugin,
+    // and made the catch below dead code. The computed specifier is opaque
+    // to static analysis while behaving identically at runtime, keeping the
+    // package genuinely optional. Do not "simplify" this back to a literal.
+    const specifier = 'openapi-typescript';
+    const mod = await import(specifier) as {
+      default: unknown;
+      astToString?: unknown;
+    };
     // openapi-typescript v7+ returns TypeScript AST nodes and provides
     // astToString() to serialise them. Earlier versions returned a string
     // directly. Support both shapes.
@@ -592,8 +720,17 @@ function emitEnvDeclaration(
 }
 
 // ---------------------------------------------------------------------------
-// Minimal Vite type stubs (avoids adding vite as a dependency)
+// Minimal Vite/Rollup type stubs (avoids adding vite/rollup as dependencies)
 // ---------------------------------------------------------------------------
+
+/**
+ * The slice of Rollup's `PluginContext` that `buildStart` uses. Optional
+ * because unit tests (and exotic hosts) may invoke the hook without a
+ * context.
+ */
+interface RollupPluginContext {
+  addWatchFile?: (id: string) => void;
+}
 
 interface ViteModuleNode {
   id: string | null;

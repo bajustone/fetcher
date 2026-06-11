@@ -1,23 +1,65 @@
 {
   "name": "@bajustone/fetcher",
   "version": "0.10.0",
-  "description": "Schema-validated, typed fetch client with OpenAPI support",
+  "description": "Schema-validated, typed fetch client with OpenAPI support. Standard Schema V1, zero dependencies, runs on Node, Bun, Deno, browsers, and edge workers.",
   "type": "module",
-  "module": "src/index.ts",
-  "exports": {
-    ".": "./src/index.ts",
-    "./schema": "./src/schema/index.ts",
-    "./openapi": "./src/openapi/index.ts",
-    "./spec-tools": "./src/spec-tools/index.ts",
-    "./vite": "./src/vite-plugin.ts"
-  },
   "license": "MIT",
+  "author": "Bahati Justin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bajustone/fetcher.git"
+  },
+  "homepage": "https://github.com/bajustone/fetcher#readme",
+  "bugs": {
+    "url": "https://github.com/bajustone/fetcher/issues"
+  },
+  "keywords": [
+    "fetch",
+    "http-client",
+    "openapi",
+    "typescript",
+    "validation",
+    "standard-schema",
+    "zod",
+    "valibot",
+    "typed",
+    "api-client"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "default": "./dist/schema/index.js"
+    },
+    "./openapi": {
+      "types": "./dist/openapi/index.d.ts",
+      "default": "./dist/openapi/index.js"
+    },
+    "./spec-tools": {
+      "types": "./dist/spec-tools/index.d.ts",
+      "default": "./dist/spec-tools/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite-plugin.d.ts",
+      "default": "./dist/vite-plugin.js"
+    }
+  },
   "files": [
+    "dist",
     "src",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:watch": "bun test --watch",
@@ -25,19 +67,29 @@
     "lint:fix": "eslint . --fix",
     "version": "bun scripts/changelog.ts",
     "publish:dry": "npx jsr publish --dry-run --allow-dirty",
-    "prepare": "husky"
+    "postbuild": "publint && attw --pack . --profile esm-only",
+    "prepublishOnly": "bun run build",
+    "prepare": "husky || true"
   },
   "devDependencies": {
     "@antfu/eslint-config": "^8.0.0",
+    "@arethetypeswrong/cli": "^0.18.2",
     "@types/bun": "latest",
     "eslint": "^10.1.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
     "openapi-typescript": "^7.13.0",
+    "publint": "^0.3.14",
+    "typescript": "^5.9.3",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
   },
   "lint-staged": {
     "*.ts": "eslint --fix"

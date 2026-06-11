@@ -89,6 +89,8 @@ export type { FRecord, FTuple } from './record-tuple.ts';
 
 export { default_, refined } from './refinements.ts';
 
+export type { RefinedOptions } from './refinements.ts';
+
 export { compile, ref } from './refs.ts';
 
 export { transform } from './transform.ts';

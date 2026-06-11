@@ -12,8 +12,8 @@
  *
  * ## Subpaths
  *
- * - `@bajustone/fetcher` (this entry) — `createFetch`, middleware, types,
- *   `inline()`, `fromJSONSchema()`.
+ * - `@bajustone/fetcher` (this entry) — `createFetch`, middleware, error
+ *   classes, types.
  * - `@bajustone/fetcher/schema` — native schema builder (`object`, `string`,
  *   `integer`, `optional`, `ref`, `compile`, formats, etc.). Tree-shakeable
  *   per factory.
@@ -47,48 +47,37 @@
 export {
   createFetch,
   extractErrorMessage,
+  FetcherAbortError,
   FetcherHTTPError,
   FetcherNetworkError,
   FetcherRequestError,
+  FetcherTimeoutError,
   FetcherValidationError,
 } from './fetcher.ts';
 export type { JSONSchemaToType } from './infer-spec.ts';
 export { authBearer, bearerWithRefresh, cookieAuth, parseSetCookie, retry, timeout } from './middleware.ts';
 
-export type { BearerWithRefreshOptions, CookieAuthOptions } from './middleware.ts';
+export type { BearerWithRefreshOptions, CookieAuthOptions, ExcludeMatcher } from './middleware.ts';
+// NOTE (v1.0 surface): the OAS type-plumbing helpers that used to be
+// re-exported here (FilterKeys, MediaType, the Resolve*For/Resolve*FromPaths
+// family, IsTypedCall, AvailablePaths/Methods, OpenAPI*Status, OpenAPIPaths)
+// are internal wiring and are no longer part of the public contract. Import
+// what you need for wrapper typing from the documented set below.
 export type {
-  AvailableMethods,
-  AvailablePaths,
   ExtractPathParams,
   FetchConfig,
   FetcherError,
   FetcherErrorLocation,
   FetchFn,
-  FilterKeys,
   HttpMethod,
   InferOutput,
   InferRoutesFromSpec,
   InferSchema,
-  IsTypedCall,
-  MediaType,
   MethodShortcutFn,
   Middleware,
-  OpenAPIErrorStatus,
-  OpenAPILowercaseMethod,
-  OpenAPIPaths,
-  OpenAPISuccessStatus,
   PathsToRoutes,
   QueryDescriptor,
-  ResolveBodyFor,
-  ResolveBodyFromPaths,
-  ResolveErrorResponseFor,
-  ResolveErrorResponseFromPaths,
-  ResolveParamsFor,
-  ResolveParamsFromPaths,
-  ResolveQueryFor,
-  ResolveQueryFromPaths,
-  ResolveResponseFor,
-  ResolveResponseFromPaths,
+  QuerySerializer,
   ResultData,
   RetryOptions,
   RouteDefinition,

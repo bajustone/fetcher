@@ -183,7 +183,26 @@ describe('optional, nullable, union, intersect, enum', () => {
     const S = union([string(), integer()]);
     expect(ok(run(S, 'hi'))).toBe('hi');
     expect(ok(run(S, 3))).toBe(3);
-    expect(issues(run(S, true))[0]!.message).toBe('No variant matched');
+    expect(issues(run(S, true))[0]!.message).toBe('No variant matched (2 variants tried)');
+  });
+
+  it('union failure carries the best-matching variant\'s issues with paths', () => {
+    const S = union([object({ a: string() }), object({ b: number() })]);
+    const r = run(S, { a: 42 });
+    const list = issues(r);
+    expect(list[0]!.code).toBe('no_variant_matched');
+    expect(list.length).toBeGreaterThan(1);
+    // The best-matching variant is the first (one issue: a is not a string).
+    expect(list[1]!.code).toBe('expected_string');
+    expect(list[1]!.path).toEqual(['a']);
+  });
+
+  it('union member issue paths are prefixed when nested in an object', () => {
+    const S = object({ field: union([object({ a: string() }), object({ b: number() })]) });
+    const r = run(S, { field: { a: 42 } });
+    const list = issues(r);
+    expect(list[0]!.path).toEqual(['field']);
+    expect(list[1]!.path).toEqual(['field', 'a']);
   });
 
   it('intersect requires all', () => {
@@ -907,5 +926,733 @@ describe('parseForm', () => {
       },
     };
     expect(() => parseForm(asyncSchema, 'x')).toThrow(TypeError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.0 hardening regressions
+// ---------------------------------------------------------------------------
+
+describe('number/integer reject non-finite values', () => {
+  it('number() rejects Infinity, -Infinity, 1e999 and NaN', () => {
+    expect(issues(run(number(), Infinity))[0]!.code).toBe('expected_number');
+    expect(issues(run(number(), -Infinity))[0]!.code).toBe('expected_number');
+    expect(issues(run(number(), Number('1e999')))[0]!.code).toBe('expected_number');
+    expect(issues(run(number(), Number.NaN))[0]!.code).toBe('expected_number');
+  });
+
+  it('number() with bounds still rejects Infinity (no bound bypass)', () => {
+    expect(issues(run(number({ minimum: 0 }), Infinity))[0]!.code).toBe('expected_number');
+  });
+
+  it('integer() rejects Infinity and NaN', () => {
+    expect(issues(run(integer(), Infinity))[0]!.code).toBe('expected_integer');
+    expect(issues(run(integer(), Number.NaN))[0]!.code).toBe('expected_integer');
+  });
+
+  it('finite() stays equivalent to number()', () => {
+    expect(ok(run(finite(), 1.5))).toBe(1.5);
+    expect(issues(run(finite(), Infinity))[0]!.code).toBe('expected_number');
+  });
+});
+
+describe('multipleOf at large magnitudes', () => {
+  it('rejects non-multiples beyond the old relative-tolerance horizon', () => {
+    expect(issues(run(number({ multipleOf: 1 }), 600000000.5))[0]!.code).toBe('not_a_multiple');
+    expect(issues(run(number({ multipleOf: 1 }), 10000000000.001))[0]!.code).toBe('not_a_multiple');
+    expect(issues(run(number({ multipleOf: 0.01 }), 10000000.005))[0]!.code).toBe('not_a_multiple');
+  });
+
+  it('still accepts true large multiples and the official float traps', () => {
+    expect(ok(run(number({ multipleOf: 1 }), 600000001))).toBe(600000001);
+    expect(ok(run(number({ multipleOf: 0.0001 }), 0.0075))).toBe(0.0075);
+    // 1e308 / 0.123456789 overflows to Infinity — must be invalid, not thrown.
+    expect(issues(run(number({ multipleOf: 0.123456789 }), 1e308))[0]!.code).toBe('not_a_multiple');
+  });
+});
+
+describe('string length counts Unicode code points', () => {
+  it('astral characters count once (JSON Schema 2020-12 semantics)', () => {
+    expect(ok(run(string({ maxLength: 1 }), '😀'))).toBe('😀');
+    expect(ok(run(string({ maxLength: 2 }), '💩💩'))).toBe('💩💩');
+    expect(issues(run(string({ minLength: 2 }), '😀'))[0]!.code).toBe('too_short');
+    expect(ok(run(string({ length: 1 }), '😀'))).toBe('😀');
+    expect(issues(run(string({ maxLength: 2 }), '💩💩💩'))[0]!.code).toBe('too_long');
+  });
+
+  it('BMP strings behave exactly as before', () => {
+    expect(ok(run(string({ minLength: 2, maxLength: 3 }), 'abc'))).toBe('abc');
+    expect(issues(run(string({ maxLength: 3 }), 'abcd'))[0]!.code).toBe('too_long');
+  });
+});
+
+describe('string emission of runtime-only options', () => {
+  it('length emits minLength + maxLength', () => {
+    const s = string({ length: 3 });
+    expect(s.minLength).toBe(3);
+    expect(s.maxLength).toBe(3);
+  });
+
+  it('a single startsWith/endsWith/includes emits an equivalent pattern', () => {
+    expect(string({ startsWith: 'a.b' }).pattern).toBe('^a\\.b');
+    expect(string({ endsWith: '!' }).pattern).toBe('!$');
+    expect(string({ includes: 'x*y' }).pattern).toBe('x\\*y');
+  });
+
+  it('explicit pattern wins and combinations stay runtime-only', () => {
+    expect(string({ pattern: '^a$', startsWith: 'a' }).pattern).toBe('^a$');
+    expect(string({ startsWith: 'a', endsWith: 'b' }).pattern).toBeUndefined();
+  });
+});
+
+describe('literal/enum_ SameValueZero equality', () => {
+  it('literal(NaN) matches NaN; enum_ agrees', () => {
+    expect(run(literal(Number.NaN), Number.NaN).issues).toBeUndefined();
+    expect(run(enum_([Number.NaN]), Number.NaN).issues).toBeUndefined();
+  });
+
+  it('literal(0) matches -0 on both', () => {
+    expect(run(literal(0), -0).issues).toBeUndefined();
+    expect(run(enum_([0]), -0).issues).toBeUndefined();
+  });
+});
+
+describe('object() unknown-key policy', () => {
+  const shape = { a: string(), d: default_(string(), 'D'), o: optional(string()) };
+
+  it('passthrough (default) keeps unknown keys and aliases the input', () => {
+    const S = object({ a: string() });
+    const input = { a: 'x', extra: 1 };
+    const r = run(S, input);
+    expect(ok(r)).toBe(input as never);
+    expect((ok(r) as Record<string, unknown>).extra).toBe(1);
+  });
+
+  it('strip returns a new object with only declared keys (defaults materialized)', () => {
+    const S = object(shape, { unknownKeys: 'strip' });
+    const input = { a: 'x', extra: 1, more: true };
+    const r = run(S, input);
+    const v = ok(r) as Record<string, unknown>;
+    expect(v).not.toBe(input);
+    expect(v).toEqual({ a: 'x', d: 'D' });
+    // missing optional key is not materialized; present one is kept.
+    const v2 = ok(run(S, { a: 'x', o: 'here', junk: 0 })) as Record<string, unknown>;
+    expect(v2).toEqual({ a: 'x', d: 'D', o: 'here' });
+  });
+
+  it('strict reports one unknown_key issue per extra key, with path', () => {
+    const S = object({ a: string() }, { unknownKeys: 'strict' });
+    const r = run(S, { a: 'x', extra: 1, more: true });
+    const list = issues(r);
+    expect(list.map(i => i.code)).toEqual(['unknown_key', 'unknown_key']);
+    expect(list.map(i => i.path?.[0]).sort()).toEqual(['extra', 'more']);
+    expect(ok(run(S, { a: 'x' }))).toEqual({ a: 'x' });
+  });
+
+  it('strict emits additionalProperties: false; others do not', () => {
+    expect(object({ a: string() }, { unknownKeys: 'strict' }).additionalProperties).toBe(false);
+    expect(object({ a: string() }).additionalProperties).toBeUndefined();
+    expect(object({ a: string() }, { unknownKeys: 'strip' }).additionalProperties).toBeUndefined();
+  });
+});
+
+describe('optional keys present with undefined', () => {
+  it('object() accepts { a: undefined } for an optional key', () => {
+    const S = object({ a: optional(string()) });
+    expect(run(S, { a: undefined }).issues).toBeUndefined();
+    expect(run(S, {}).issues).toBeUndefined();
+    expect(issues(run(S, { a: 1 }))[0]!.code).toBe('expected_string');
+  });
+
+  it('partial()-derived objects accept explicit undefined', () => {
+    const P = partial(object({ a: string() }));
+    expect(run(P, { a: undefined }).issues).toBeUndefined();
+  });
+
+  it('required keys with explicit undefined still fail', () => {
+    const S = object({ a: string() });
+    expect(issues(run(S, { a: undefined }))[0]!.code).toBe('expected_string');
+  });
+});
+
+describe('async members are rejected loudly in sync combinators', () => {
+  const asyncSchema: FSchema<string> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: async v => ({ value: v as string }),
+    },
+  };
+
+  it('object/array/record/tuple throw TypeError instead of corrupting output', () => {
+    expect(() => run(object({ name: asyncSchema }), { name: 'alice' })).toThrow('Schema validation must be synchronous');
+    expect(() => run(array(asyncSchema), ['x'])).toThrow(TypeError);
+    expect(() => run(record(asyncSchema), { k: 'x' })).toThrow(TypeError);
+    expect(() => run(tuple([asyncSchema]), ['x'])).toThrow(TypeError);
+  });
+
+  it('union/intersect/discriminatedUnion throw TypeError', () => {
+    expect(() => run(union([asyncSchema, string()]), 42)).toThrow(TypeError);
+    expect(() => run(intersect([asyncSchema]), 'x')).toThrow(TypeError);
+    const DU = discriminatedUnion('t', { a: asyncSchema as never });
+    expect(() => run(DU, { t: 'a' })).toThrow(TypeError);
+  });
+
+  it('optional/nullable/refined/default_/transform throw TypeError', () => {
+    expect(() => run(optional(asyncSchema), 'x')).toThrow(TypeError);
+    expect(() => run(nullable(asyncSchema), 'x')).toThrow(TypeError);
+    expect(() => run(refined(asyncSchema, () => true), 'x')).toThrow(TypeError);
+    expect(() => run(default_(asyncSchema, 'd'), 'x')).toThrow(TypeError);
+    expect(() => run(transform(asyncSchema, s => s), 'x')).toThrow(TypeError);
+  });
+
+  it('optional() still short-circuits undefined without calling the inner validator', () => {
+    expect(run(optional(asyncSchema), undefined).issues).toBeUndefined();
+  });
+});
+
+describe('discriminatedUnion hardening', () => {
+  it('distinguishes missing_discriminator from unknown_discriminator', () => {
+    const S = discriminatedUnion('kind', { a: object({ x: boolean() }) });
+    const missing = run(S, { x: true });
+    expect(missing.issues?.[0]!.code).toBe('missing_discriminator');
+    expect(missing.issues?.[0]!.path).toEqual(['kind']);
+    const unknownTag = run(S, { kind: 'b', x: true });
+    expect(unknownTag.issues?.[0]!.code).toBe('unknown_discriminator');
+  });
+
+  it('dispatches number and boolean tags via their string form', () => {
+    const S = discriminatedUnion('version', {
+      1: object({ version: literal(1), legacy: boolean() }),
+      2: object({ version: literal(2), modern: boolean() }),
+    });
+    expect(ok(run(S, { version: 2, modern: true }))).toEqual({ version: 2, modern: true });
+    expect(ok(run(S, { version: 1, legacy: false }))).toEqual({ version: 1, legacy: false });
+    const B = discriminatedUnion('flag', { true: object({ flag: literal(true) }) });
+    expect(run(B, { flag: true }).issues).toBeUndefined();
+  });
+
+  it('injects the tag const into emitted variants that omit it', () => {
+    const S = discriminatedUnion('kind', {
+      cat: object({ meows: boolean() }),
+      dog: object({ kind: literal('dog'), barks: boolean() }),
+    });
+    const cat = S.oneOf[0] as unknown as { properties: Record<string, { const?: string }>; required: string[] };
+    expect(cat.properties.kind).toEqual({ const: 'cat' });
+    expect(cat.required).toContain('kind');
+    // Variants that already constrain the tag are emitted by identity.
+    const dogVariant = object({ kind: literal('dog'), barks: boolean() });
+    const S2 = discriminatedUnion('kind', { dog: dogVariant });
+    expect(S2.oneOf[0]).toBe(dogVariant as never);
+  });
+
+  it('serialized oneOf reproduces the dispatch (tag is constrained)', () => {
+    const S = discriminatedUnion('kind', {
+      cat: object({ meows: boolean() }),
+      dog: object({ barks: boolean() }),
+    });
+    const dog = S.oneOf[1] as unknown as { properties: Record<string, { const?: string }> };
+    // {kind:'dog', meows:true} must NOT satisfy the emitted cat variant.
+    const cat = S.oneOf[0] as unknown as { properties: Record<string, { const?: string }> };
+    expect(cat.properties.kind!.const).toBe('cat');
+    expect(dog.properties.kind!.const).toBe('dog');
+  });
+});
+
+describe('default_ fallback instances are not shared', () => {
+  it('object/array fallbacks are cloned per use', () => {
+    const S = object({ tags: default_(array(string()), []) });
+    const r1 = ok(run(S, {})) as { tags: string[] };
+    r1.tags.push('polluted');
+    const r2 = ok(run(S, {})) as { tags: string[] };
+    expect(r2.tags).toEqual([]);
+  });
+
+  it('function fallbacks are invoked per use', () => {
+    let calls = 0;
+    const S = default_(string(), () => {
+      calls++;
+      return `v${calls}`;
+    });
+    expect(ok(run(S, undefined))).toBe('v1');
+    expect(ok(run(S, undefined))).toBe('v2');
+    expect(ok(run(S, 'real'))).toBe('real');
+    expect(calls).toBe(2);
+  });
+
+  it('factory fallbacks emit no default annotation; value fallbacks still do', () => {
+    expect((default_(string(), () => 'x') as unknown as { default?: string }).default).toBeUndefined();
+    expect((default_(string(), 'x') as unknown as { default?: string }).default).toBe('x');
+  });
+});
+
+describe('composition guards against non-object bases', () => {
+  it('extendSchema throws TypeError for a union base', () => {
+    const u = union([object({ a: string() }), object({ b: number() })]);
+    expect(() => extendSchema(u as unknown as FSchema<unknown>, { id: number() })).toThrow(TypeError);
+  });
+
+  it('merge throws TypeError when either side is not an object schema', () => {
+    expect(() => merge(string() as never, object({ a: string() }))).toThrow(TypeError);
+    expect(() => merge(object({ a: string() }), record(string()) as never)).toThrow(TypeError);
+  });
+
+  it('partial/pick/omit/required throw TypeError for non-object bases', () => {
+    expect(() => partial(string() as never)).toThrow(TypeError);
+    expect(() => pick(string() as never, [] as never)).toThrow(TypeError);
+    expect(() => omit(string() as never, [] as never)).toThrow(TypeError);
+    expect(() => required(string() as never)).toThrow(TypeError);
+  });
+});
+
+describe('record() accepts plain objects only', () => {
+  it('rejects Map/Set/Date/class instances', () => {
+    const S = record(string());
+    expect(issues(run(S, new Map([['a', 'b']])))[0]!.code).toBe('expected_object');
+    expect(issues(run(S, new Set(['a'])))[0]!.code).toBe('expected_object');
+    expect(issues(run(S, new Date()))[0]!.code).toBe('expected_object');
+    class Box { a = 'x'; }
+    expect(issues(run(S, new Box()))[0]!.code).toBe('expected_object');
+  });
+
+  it('accepts null-prototype objects and ignores inherited properties', () => {
+    const S = record(boolean());
+    const nullProto = Object.create(null) as Record<string, boolean>;
+    nullProto.a = true;
+    expect(ok(run(S, nullProto))).toEqual({ a: true } as never);
+    // An object inheriting enumerable props has a non-plain prototype → rejected.
+    expect(issues(run(S, Object.create({ inheritedAdmin: true })))[0]!.code).toBe('expected_object');
+  });
+});
+
+describe('prototype-named keys are safe end to end', () => {
+  it('object() with a literal __proto__ property key keeps a consistent shape', () => {
+    const S = object({ ['__proto__']: string() });
+    expect(Object.keys(S.properties)).toEqual(['__proto__']);
+    expect(S.required).toEqual(['__proto__']);
+    const good = JSON.parse('{"__proto__": "x"}') as Record<string, unknown>;
+    expect(run(S, good).issues).toBeUndefined();
+    expect(issues(run(S, {}))[0]!.code).toBe('missing');
+  });
+
+  it('required keys named like Object.prototype members are reported missing', () => {
+    const S = object({ constructor: unknown(), toString: string() });
+    const r = run(S, {});
+    const codes = issues(r).map(i => `${String(i.path?.[0])}:${i.code}`).sort();
+    expect(codes).toEqual(['constructor:missing', 'toString:missing']);
+  });
+
+  it('default_ fills fallbacks for prototype-named keys', () => {
+    const S = object({ toString: default_(string(), 'fallback') });
+    expect(ok(run(S, {})) as never).toEqual({ toString: 'fallback' } as never);
+  });
+
+  it('transform output for a __proto__ key never pollutes the prototype', () => {
+    const S = object({ ['__proto__']: transform(string(), s => s.toUpperCase()) });
+    const input = JSON.parse('{"__proto__": "x"}') as Record<string, unknown>;
+    const v = ok(run(S, input)) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(v)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(v, '__proto__')!.value).toBe('X');
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('groupIssuesByField keeps prototype-named fields', () => {
+    const grouped = groupIssuesByField([
+      { message: 'bad-proto', path: ['__proto__'] },
+      { message: 'bad-toString', path: ['toString'] },
+      { message: 'bad-ctor', path: ['constructor'] },
+      { message: 'bad-real', path: ['real'] },
+    ]);
+    expect(Object.getOwnPropertyDescriptor(grouped, '__proto__')!.value).toBe('bad-proto');
+    expect(grouped['toString' as string]).toBe('bad-toString');
+    expect(grouped['constructor' as string]).toBe('bad-ctor');
+    expect(grouped.real).toBe('bad-real');
+  });
+});
+
+describe('compile() reaches nested and wrapped refs', () => {
+  it('binds refs inside defs targets (multi-level graphs)', () => {
+    const User = object({ name: string() });
+    const Post = object({ author: ref('User') });
+    const Blog = object({ posts: array(ref('Post')) });
+    compile(Blog, { User, Post });
+    expect(run(Blog, { posts: [{ author: { name: 'a' } }] }).issues).toBeUndefined();
+    expect(issues(run(Blog, { posts: [{ author: { name: 1 } }] }))[0]!.path).toEqual(['posts', 0, 'author', 'name']);
+  });
+
+  it('binds refs inside record() values and tuple() members', () => {
+    const Item = object({ id: integer() });
+    const R = object({ things: record(ref('Item')) });
+    compile(R, { Item });
+    expect(run(R, { things: { a: { id: 1 } } }).issues).toBeUndefined();
+
+    const T = object({ pair: tuple([ref('Item'), string()]) });
+    compile(T, { Item });
+    expect(run(T, { pair: [{ id: 1 }, 'x'] }).issues).toBeUndefined();
+  });
+
+  it('binds refs wrapped by refined/transform/default_/optional', () => {
+    const Name = string({ minLength: 2 });
+
+    const Refined = object({ name: refined(ref<string>('Name'), s => s.length > 1) });
+    compile(Refined, { Name });
+    expect(run(Refined, { name: 'ab' }).issues).toBeUndefined();
+    expect(issues(run(Refined, { name: 'a' }))[0]!.code).toBe('too_short');
+
+    const Transformed = object({ name: transform(ref<string>('Name'), s => s.toUpperCase()) });
+    compile(Transformed, { Name });
+    expect(ok(run(Transformed, { name: 'ab' }))).toEqual({ name: 'AB' } as never);
+
+    const Defaulted = object({ name: default_(ref<string>('Name'), 'zz') });
+    compile(Defaulted, { Name });
+    expect(ok(run(Defaulted, {}))).toEqual({ name: 'zz' } as never);
+    expect(run(Defaulted, { name: 'ab' }).issues).toBeUndefined();
+
+    const Optional = object({ name: optional(ref<string>('Name')) });
+    compile(Optional, { Name });
+    expect(run(Optional, { name: 'ab' }).issues).toBeUndefined();
+    expect(issues(run(Optional, { name: 'a' }))[0]!.code).toBe('too_short');
+  });
+});
+
+describe('wrapper over optional keeps both behaviors inside object()', () => {
+  it('transform(optional(...)) stays optional AND transforms (including missing keys)', () => {
+    const S = object({ name: transform(optional(string()), v => (v ?? 'DEFAULT').toUpperCase()) });
+    expect(S.required).toEqual([]);
+    expect(ok(run(S, { name: 'bob' }))).toEqual({ name: 'BOB' } as never);
+    expect(ok(run(S, {}))).toEqual({ name: 'DEFAULT' } as never);
+    expect(ok(run(S, { name: undefined }))).toEqual({ name: 'DEFAULT' } as never);
+  });
+
+  it('refined(optional(...)) stays optional AND runs the predicate', () => {
+    const S = object({
+      nick: refined(optional(string()), v => v === undefined || v.length > 3, 'too short'),
+    });
+    expect(S.required).toEqual([]);
+    expect(run(S, {}).issues).toBeUndefined();
+    expect(run(S, { nick: 'long-enough' }).issues).toBeUndefined();
+    const r = run(S, { nick: 'ab' });
+    expect(issues(r)[0]!.code).toBe('refine_failed');
+    expect(issues(r)[0]!.path).toEqual(['nick']);
+  });
+
+  it('transform(default_(...)) keeps the default treatment', () => {
+    const S = object({ theme: transform(default_(string(), 'light'), s => s.toUpperCase()) });
+    expect(S.required).toEqual([]);
+    expect(ok(run(S, {}))).toEqual({ theme: 'LIGHT' } as never);
+    expect(ok(run(S, { theme: 'dark' }))).toEqual({ theme: 'DARK' } as never);
+  });
+
+  it('wrappers no longer leak the optional markers via spread', () => {
+    const w = transform(optional(string()), v => v) as unknown as Record<string, unknown>;
+    expect(w['~optional']).toBe(true); // deliberate propagation…
+    expect(w['~inner']).toBeDefined(); // …via the explicit protocol,
+    expect(w.type).toBe('string'); // with the inner JSON meta carried over.
+  });
+});
+
+describe('transform errors become issues', () => {
+  it('a throwing transform yields transform_error instead of throwing', () => {
+    const S = transform(string(), () => {
+      throw new Error('boom');
+    });
+    const r = run(S, 'x');
+    expect(issues(r)[0]!.code).toBe('transform_error');
+    expect(issues(r)[0]!.message).toBe('boom');
+  });
+
+  it('non-Error throws are stringified', () => {
+    const S = transform(string(), () => {
+      throw 'plain'; // eslint-disable-line no-throw-literal
+    });
+    expect(issues(run(S, 'x'))[0]!.message).toBe('plain');
+  });
+
+  it('nested in an object, the issue carries the member path', () => {
+    const S = object({ a: transform(string(), () => {
+      throw new Error('nested boom');
+    }) });
+    expect(issues(run(S, { a: 'x' }))[0]!.path).toEqual(['a']);
+  });
+});
+
+describe('refined() options object', () => {
+  it('accepts { message, code, path }', () => {
+    const S = refined(
+      object({ password: string(), confirm: string() }),
+      o => o.password === o.confirm,
+      { message: 'Passwords must match', code: 'password_mismatch', path: ['confirm'] },
+    );
+    const r = run(S, { password: 'a', confirm: 'b' });
+    expect(issues(r)[0]).toEqual({
+      code: 'password_mismatch',
+      message: 'Passwords must match',
+      path: ['confirm'],
+    });
+  });
+
+  it('path routes through groupIssuesByField', () => {
+    const S = refined(
+      object({ password: string(), confirm: string() }),
+      o => o.password === o.confirm,
+      { message: 'Passwords must match', path: ['confirm'] },
+    );
+    const r = run(S, { password: 'a', confirm: 'b' });
+    expect(groupIssuesByField(r.issues ?? [])).toEqual({ confirm: 'Passwords must match' });
+  });
+
+  it('defaults stay intact when options omit fields', () => {
+    const S = refined(string(), () => false, {});
+    const r = run(S, 'x');
+    expect(issues(r)[0]!.code).toBe('refine_failed');
+    expect(issues(r)[0]!.message).toBe('Refinement failed');
+  });
+});
+
+describe('deep recursion returns an issue instead of throwing', () => {
+  it('self-referential schema on hostile deep input yields max_depth_exceeded', () => {
+    interface TreeNode { children?: TreeNode[] }
+    const Tree = object({ children: optional(array(ref<TreeNode>('Tree'))) });
+    compile(Tree, { Tree });
+    let node: TreeNode = {};
+    for (let i = 0; i < 100000; i++)
+      node = { children: [node] };
+    const r = run(Tree, node);
+    expect(r.issues).toBeDefined();
+    expect(r.issues!.some(i => i.code === 'max_depth_exceeded')).toBe(true);
+  });
+});
+
+describe('tightened format semantics', () => {
+  it('datetime/date/time reject out-of-range fields', () => {
+    expect(issues(run(datetime(), '9999-99-99T99:99:99Z'))[0]!.code).toBe('pattern_mismatch');
+    expect(issues(run(datetime(), '2026-13-01T00:00:00Z'))[0]!.code).toBe('pattern_mismatch');
+    expect(issues(run(datetime(), '2026-01-01T24:00:00Z'))[0]!.code).toBe('pattern_mismatch');
+    expect(issues(run(datetime(), '2026-01-01T00:00:00+24:00'))[0]!.code).toBe('pattern_mismatch');
+    expect(issues(run(date(), '2026-00-10'))[0]!.code).toBe('pattern_mismatch');
+    expect(issues(run(date(), '2026-13-01'))[0]!.code).toBe('pattern_mismatch');
+    expect(issues(run(time(), '24:00:00'))[0]!.code).toBe('pattern_mismatch');
+    expect(issues(run(time(), '12:60:00'))[0]!.code).toBe('pattern_mismatch');
+    // Still-valid values keep passing.
+    expect(run(datetime(), '2026-12-31T23:59:59.999+05:30').issues).toBeUndefined();
+    expect(run(time(), '23:59:59Z').issues).toBeUndefined();
+  });
+
+  it('email follows the WHATWG HTML5 grammar', () => {
+    expect(run(email(), 'simple@example.com').issues).toBeUndefined();
+    expect(run(email(), 'o\'brien+tag@sub.example.co').issues).toBeUndefined();
+    // HTML5's local part is a plain character class — dots are unrestricted
+    // there (a documented willful violation of RFC 5322; Zod's default email
+    // is stricter on the local part).
+    expect(run(email(), 'a..b@c.com').issues).toBeUndefined();
+    expect(run(email(), '.a@b.com').issues).toBeUndefined();
+    // Domain labels ARE constrained: no leading/trailing hyphens, no empty
+    // labels, ASCII only, max 63 chars.
+    expect(issues(run(email(), 'a@-b.com')).length).toBe(1);
+    expect(issues(run(email(), 'a@b-.com')).length).toBe(1);
+    expect(issues(run(email(), 'a@b..com')).length).toBe(1);
+    expect(issues(run(email(), 'a@b.com.')).length).toBe(1);
+    expect(issues(run(email(), 'a@日本.com')).length).toBe(1);
+    expect(issues(run(email(), `a@${'b'.repeat(64)}.com`)).length).toBe(1);
+    expect(issues(run(email(), 'no-at-sign')).length).toBe(1);
+    expect(issues(run(email(), 'two@@signs.com')).length).toBe(1);
+  });
+
+  it('uuid/url runtime and emitted pattern agree without flags', () => {
+    for (const f of [uuid(), url(), email()]) {
+      const re = new RegExp(f.pattern!);
+      const samples = f.format === 'uuid'
+        ? ['123E4567-E89B-12D3-A456-426614174000', 'not-a-uuid']
+        : f.format === 'uri'
+          ? ['HTTPS://EXAMPLE.COM/X', 'mailto:a@b.com']
+          : ['a@b.com', 'a..b@c.com'];
+      for (const s of samples) {
+        const runtimeOk = !run(f, s).issues;
+        expect(re.test(s)).toBe(runtimeOk);
+      }
+    }
+  });
+
+  it('uppercase and max UUIDs still accepted', () => {
+    expect(run(uuid(), '123E4567-E89B-12D3-A456-426614174000').issues).toBeUndefined();
+    expect(run(uuid(), 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF').issues).toBeUndefined();
+    expect(run(uuid(), 'ffffffff-ffff-ffff-ffff-ffffffffffff').issues).toBeUndefined();
+  });
+});
+
+describe('composition preserves the unknownKeys policy', () => {
+  const Strict = object({ a: string(), tag: optional(string()) }, { unknownKeys: 'strict' });
+  const Strip = object({ a: string() }, { unknownKeys: 'strip' });
+
+  it('partial keeps strict rejection and the emitted marker', () => {
+    const P = partial(Strict);
+    expect(P.additionalProperties).toBe(false);
+    expect(issues(run(P, { a: 'x', zz: 1 }))[0]!.code).toBe('unknown_key');
+    expect(run(P, { a: 'x' }).issues).toBeUndefined();
+  });
+
+  it('required/pick/omit/extend keep strict rejection', () => {
+    expect(issues(run(required(Strict), { a: 'x', tag: 't', zz: 1 }))[0]!.code).toBe('unknown_key');
+    expect(issues(run(pick(Strict, ['a'] as const), { a: 'x', zz: 1 }))[0]!.code).toBe('unknown_key');
+    expect(issues(run(omit(Strict, ['tag'] as const), { a: 'x', zz: 1 }))[0]!.code).toBe('unknown_key');
+    expect(issues(run(extend(Strict, { b: number() }), { a: 'x', b: 1, zz: 1 }))[0]!.code).toBe('unknown_key');
+  });
+
+  it('extendSchema keeps strict rejection', () => {
+    const E = extendSchema(Strict as FSchema<unknown>, { id: number() });
+    expect(issues(run(E, { a: 'x', id: 1, zz: 1 }))[0]!.code).toBe('unknown_key');
+  });
+
+  it('strip keeps stripping through composition', () => {
+    const v = ok(run(omit(Strip, [] as never[]), { a: 'x', junk: 1 })) as Record<string, unknown>;
+    expect(v).toEqual({ a: 'x' });
+    const p = ok(run(partial(Strip), { junk: 1 })) as Record<string, unknown>;
+    expect(p).toEqual({});
+  });
+
+  it('merge: the second schema\'s policy wins outright (documented)', () => {
+    const Plain = object({ b: number() });
+    // strict second → strict result.
+    const M1 = merge(Plain, Strict);
+    expect(M1.additionalProperties).toBe(false);
+    expect(issues(run(M1, { a: 'x', b: 1, zz: 1 }))[0]!.code).toBe('unknown_key');
+    // passthrough second → passthrough result, even over a strict first.
+    const M2 = merge(Strict, Plain);
+    expect(M2.additionalProperties).toBeUndefined();
+    expect(run(M2, { a: 'x', b: 1, zz: 1 }).issues).toBeUndefined();
+  });
+});
+
+describe('composition rejects refined/transform/default_-wrapped object bases', () => {
+  it('partial/extendSchema throw TypeError for a refined object base', () => {
+    const Signup = refined(
+      object({ password: string(), confirm: string() }),
+      o => o.password === o.confirm,
+    );
+    expect(() => partial(Signup as never)).toThrow(TypeError);
+    expect(() => extendSchema(Signup, { id: number() })).toThrow(TypeError);
+  });
+
+  it('extend/merge throw TypeError for a transform-wrapped object base', () => {
+    const T = transform(object({ a: string() }), o => o.a.length);
+    expect(() => extend(T as never, { b: string() })).toThrow(TypeError);
+    expect(() => merge(object({ x: number() }), T as never)).toThrow(TypeError);
+    expect(() => merge(T as never, object({ x: number() }))).toThrow(TypeError);
+  });
+
+  it('pick/omit/required throw TypeError for a default_-wrapped object base', () => {
+    const D = default_(object({ a: string() }), { a: 'x' });
+    expect(() => pick(D as never, ['a'] as never)).toThrow(TypeError);
+    expect(() => omit(D as never, [] as never)).toThrow(TypeError);
+    expect(() => required(D as never)).toThrow(TypeError);
+  });
+
+  it('an annotation over a wrapper still throws (wrapper detected through the chain)', () => {
+    const W = describeSchema(refined(object({ a: string() }), () => true), 'docs');
+    expect(() => partial(W as never)).toThrow(TypeError);
+  });
+
+  it('describe/title annotations over plain objects still compose, defaults intact', () => {
+    const Annotated = describeSchema(
+      object({ id: integer(), theme: default_(string(), 'L') }),
+      'docs',
+    );
+    expect(ok(run(pick(Annotated, ['theme'] as const), {}))).toEqual({ theme: 'L' } as never);
+    const Titled = title(object({ n: default_(integer(), 7) }), 'T');
+    expect(ok(run(extend(Titled, { z: boolean() }), { z: true }))).toEqual({ n: 7, z: true } as never);
+  });
+});
+
+describe('composition preserves wrappers over optional() keys', () => {
+  const NickBase = object({
+    nick: refined(optional(string()), v => v === undefined || v.length >= 3, 'too short'),
+    other: integer(),
+  });
+
+  it('refined(optional()) survives pick/omit/partial/extend/merge', () => {
+    const composed: Array<[string, FSchema<unknown>]> = [
+      ['pick', pick(NickBase, ['nick'] as const)],
+      ['omit', omit(NickBase, ['other'] as const)],
+      ['partial', partial(NickBase)],
+      ['extend', extend(NickBase, { z: boolean() })],
+      ['merge-second', merge(object({ q: integer() }), NickBase)],
+      ['merge-first', merge(NickBase, object({ q: integer() }))],
+    ];
+    for (const [name, C] of composed) {
+      const r = run(C, { nick: 'ab', other: 1, q: 1, z: true });
+      expect(issues(r).map(i => i.code), name).toContain('refine_failed');
+      expect(run(C, { nick: 'long-enough', other: 1, q: 1, z: true }).issues, name).toBeUndefined();
+      // the key stays optional through composition.
+      expect(run(C, { other: 1, q: 1, z: true }).issues, name).toBeUndefined();
+    }
+  });
+
+  it('transform(optional()) keeps materializing values through composition', () => {
+    const TagBase = object({ tag: transform(optional(string()), v => v ?? 'none'), n: integer() });
+    expect(ok(run(pick(TagBase, ['tag'] as const), {}))).toEqual({ tag: 'none' } as never);
+    expect(ok(run(omit(TagBase, ['n'] as const), { tag: 'x' }))).toEqual({ tag: 'x' } as never);
+  });
+
+  it('wrappers survive repeated composition (round-trip)', () => {
+    const PP = partial(pick(NickBase, ['nick'] as const));
+    expect(issues(run(PP, { nick: 'ab' }))[0]!.code).toBe('refine_failed');
+    expect(run(PP, {}).issues).toBeUndefined();
+  });
+
+  it('required() refuses to silently unwrap a wrapper over optional', () => {
+    expect(() => required(NickBase)).toThrow(TypeError);
+  });
+});
+
+describe('multipleOf decimal steps stay exact at large magnitudes', () => {
+  it('accepts exact decimal multiples beyond the epsilon drift horizon (money scale)', () => {
+    expect(ok(run(number({ multipleOf: 0.01 }), 20000000.01))).toBe(20000000.01);
+    expect(ok(run(number({ multipleOf: 0.01 }), 1000000.19))).toBe(1000000.19);
+    expect(ok(run(number({ multipleOf: 0.1 }), 123456789.1))).toBe(123456789.1);
+    expect(ok(run(number({ multipleOf: 0.01 }), -20000000.01))).toBe(-20000000.01);
+  });
+
+  it('rejects near-multiples that an epsilon would falsely accept', () => {
+    expect(issues(run(number({ multipleOf: 5 }), 5.0000000001))[0]!.code).toBe('not_a_multiple');
+    expect(issues(run(number({ multipleOf: 1 }), 1e-10))[0]!.code).toBe('not_a_multiple');
+  });
+
+  it('small decimal agreements still hold', () => {
+    expect(ok(run(number({ multipleOf: 0.1 }), 0.3))).toBe(0.3);
+    expect(ok(run(number({ multipleOf: 0.0001 }), 0.0075))).toBe(0.0075);
+    expect(issues(run(number({ multipleOf: 0.1 }), 0.35))[0]!.code).toBe('not_a_multiple');
+  });
+});
+
+describe('default_ fallback cloneability is checked at construction', () => {
+  it('throws TypeError at construction for non-cloneable plain fallbacks', () => {
+    expect(() => default_(unknown(), { cb: () => {} })).toThrow(TypeError);
+    expect(() => default_(unknown(), [Symbol('x')])).toThrow(TypeError);
+    expect(() => default_(unknown(), { nested: { deep: () => 1 } })).toThrow(TypeError);
+  });
+
+  it('class instances pass through by reference (no prototype stripping, no throw)', () => {
+    class Money {
+      constructor(public cents: number) {}
+    }
+    const m = new Money(500);
+    const S = default_(unknown(), m);
+    const v = ok(run(S, undefined));
+    expect(v).toBe(m);
+    expect(v instanceof Money).toBe(true);
+  });
+
+  it('plain object/array fallbacks are still cloned per use', () => {
+    const S = default_(unknown(), { tags: ['a'] });
+    const v1 = ok(run(S, undefined)) as { tags: string[] };
+    v1.tags.push('polluted');
+    const v2 = ok(run(S, undefined)) as { tags: string[] };
+    expect(v2.tags).toEqual(['a']);
+  });
+
+  it('a factory returning a non-cloneable value never throws (called per use, no clone)', () => {
+    const S = default_(unknown(), () => ({ cb: () => 42 }));
+    const v = ok(run(S, undefined)) as { cb: () => number };
+    expect(v.cb()).toBe(42);
   });
 });

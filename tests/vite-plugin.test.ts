@@ -9,10 +9,10 @@
  * If it's not available, the `buildStart` tests will fail with a clear error.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { extractRouteSchemas } from '../src/openapi.ts';
 import { fetcherPlugin } from '../src/vite-plugin.ts';
 
@@ -132,8 +132,10 @@ describe('fetcherPlugin', () => {
 
     it('inlines only extracted schemas, not the full spec', () => {
       const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher')!;
-      // Should contain schema fragments from the petstore fixture
-      expect(code).toContain('"type":"object"');
+      // Should contain schema fragments from the petstore fixture. Data is
+      // emitted through JSON.parse("...") (own-property semantics for
+      // __proto__ keys), so the fragments appear escaped.
+      expect(code).toContain(String.raw`\"type\":\"object\"`);
       // Should NOT contain spec metadata (descriptions, summaries, etc.)
       expect(code).not.toContain('Petstore');
       expect(code).not.toContain('operationId');
@@ -325,5 +327,331 @@ describe('fetcherPlugin OpenAPI guard (issue #7)', () => {
     writeFileSync(badSpec, '{"swagger":"2.0","paths":{}}');
     const plugin = fetcherPlugin({ spec: badSpec, output: join(tmpDir, 'out') });
     await expect((plugin.buildStart as () => Promise<void>)()).rejects.toThrow(/not a valid OpenAPI 3\.x/);
+  });
+
+  it('malformed spec JSON surfaces an error naming the spec file path', async () => {
+    const badJson = join(tmpDir, 'mid-edit.json');
+    writeFileSync(badJson, '{"openapi": "3.0.3", "paths": {');
+    const plugin = fetcherPlugin({ spec: badJson, output: join(tmpDir, 'out2') });
+    const promise = (plugin.buildStart as () => Promise<void>)();
+    // The error must name the offending file (not a bare SyntaxError) so the
+    // Vite overlay / CI log points at the spec the user is mid-editing.
+    await expect(promise).rejects.toThrow(/not valid JSON/);
+    await expect((plugin.buildStart as () => Promise<void>)()).rejects.toThrow(badJson);
+  });
+});
+
+describe('fetcherPlugin remote url — timeout and fallback chain', () => {
+  let tmpDir: string;
+  const realFetch = globalThis.fetch;
+  const realWarn = console.warn;
+  let warnings: string[];
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-fallback-'));
+  });
+
+  beforeEach(() => {
+    warnings = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    console.warn = realWarn;
+  });
+
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('passes an abort signal to fetch (timeout wired up)', async () => {
+    let seenSignal: unknown;
+    const remoteBody = readFileSync(SPEC_PATH, 'utf-8');
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      seenSignal = init?.signal;
+      return new Response(remoteBody, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const plugin = fetcherPlugin({
+      spec: SPEC_PATH,
+      url: 'https://example.com/openapi.json',
+      output: join(tmpDir, 'signal'),
+    });
+    await (plugin.buildStart as () => Promise<void>)();
+
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('falls back to the local spec on timeout with a warning naming the URL', async () => {
+    // Simulate a server that accepts the connection but never responds:
+    // the promise settles only when the plugin's timeout signal aborts it.
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+      })) as unknown as typeof fetch;
+
+    const outDir = join(tmpDir, 'timeout');
+    const plugin = fetcherPlugin({
+      spec: SPEC_PATH,
+      url: 'https://stalled.example.com/openapi.json',
+      output: outDir,
+      fetchTimeoutMs: 10,
+    });
+    await (plugin.buildStart as () => Promise<void>)();
+
+    // Generation completed from the local file despite the stalled remote.
+    expect(readFileSync(join(outDir, 'paths.d.ts'), 'utf-8')).toContain('"/pets"');
+    const warning = warnings.find(w => w.includes('stalled.example.com'));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('timed out after 10ms');
+    expect(warning).toContain('using local file');
+  });
+
+  it('prefers the cached copy over the local file when the fetch fails', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+
+    const outDir = join(tmpDir, 'cached');
+    mkdirSync(outDir, { recursive: true });
+    // Pre-seed the cache with a valid spec; point `spec` at a file that
+    // would fail generation, proving the cache (not the local file) was used.
+    writeFileSync(join(outDir, '.fetcher-spec-cache.json'), readFileSync(SPEC_PATH, 'utf-8'));
+    const localSpec = join(tmpDir, 'not-openapi-local.json');
+    writeFileSync(localSpec, '{"committed":"do-not-touch"}');
+
+    const plugin = fetcherPlugin({
+      spec: localSpec,
+      url: 'https://down.example.com/openapi.json',
+      output: outDir,
+    });
+    await (plugin.buildStart as () => Promise<void>)();
+
+    expect(readFileSync(join(outDir, 'paths.d.ts'), 'utf-8')).toContain('"/pets"');
+    const warning = warnings.find(w => w.includes('down.example.com'));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('using cached copy');
+  });
+
+  it('throws an error naming the URL when no cache or local file exists', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+
+    const plugin = fetcherPlugin({
+      spec: join(tmpDir, 'does-not-exist.json'),
+      url: 'https://gone.example.com/openapi.json',
+      output: join(tmpDir, 'nothing'),
+    });
+    await expect((plugin.buildStart as () => Promise<void>)()).rejects.toThrow(
+      /gone\.example\.com.*no cached or local file exists/,
+    );
+  });
+
+  it('does not rewrite the cache file when the fetched content is unchanged', async () => {
+    const remoteBody = readFileSync(SPEC_PATH, 'utf-8');
+    globalThis.fetch = (async () =>
+      new Response(remoteBody, { status: 200 })) as unknown as typeof fetch;
+
+    const outDir = join(tmpDir, 'stable-cache');
+    const plugin = fetcherPlugin({
+      spec: SPEC_PATH,
+      url: 'https://example.com/openapi.json',
+      output: outDir,
+    });
+    await (plugin.buildStart as () => Promise<void>)();
+    const cachePath = join(outDir, '.fetcher-spec-cache.json');
+    const firstMtime = statSync(cachePath).mtimeMs;
+
+    await (plugin.buildStart as () => Promise<void>)();
+    // Same content → no write → mtime unchanged. This keeps the addWatchFile
+    // registration of the cache file from looping rollup watch mode.
+    expect(statSync(cachePath).mtimeMs).toBe(firstMtime);
+  });
+});
+
+describe('fetcherPlugin buildStart registers watch files (rollup watch mode)', () => {
+  let tmpDir: string;
+  const realFetch = globalThis.fetch;
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-watchfiles-'));
+  });
+
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('calls this.addWatchFile(specPath) so `vite build --watch` sees spec changes', async () => {
+    const watched: string[] = [];
+    const plugin = fetcherPlugin({ spec: SPEC_PATH, output: join(tmpDir, 'local') });
+    await (plugin.buildStart as (this: unknown) => Promise<void>).call({
+      addWatchFile: (id: string) => watched.push(id),
+    });
+    expect(watched).toContain(SPEC_PATH);
+  });
+
+  it('also watches the cache file when `url` is set', async () => {
+    const remoteBody = readFileSync(SPEC_PATH, 'utf-8');
+    globalThis.fetch = (async () =>
+      new Response(remoteBody, { status: 200 })) as unknown as typeof fetch;
+
+    const outDir = join(tmpDir, 'remote');
+    const watched: string[] = [];
+    const plugin = fetcherPlugin({
+      spec: SPEC_PATH,
+      url: 'https://example.com/openapi.json',
+      output: outDir,
+    });
+    await (plugin.buildStart as (this: unknown) => Promise<void>).call({
+      addWatchFile: (id: string) => watched.push(id),
+    });
+    expect(watched).toContain(SPEC_PATH);
+    expect(watched).toContain(join(outDir, '.fetcher-spec-cache.json'));
+  });
+
+  it('tolerates being invoked without a plugin context', async () => {
+    const plugin = fetcherPlugin({ spec: SPEC_PATH, output: join(tmpDir, 'no-ctx') });
+    // Unit-test style invocation: no `this`. Must not throw.
+    await (plugin.buildStart as () => Promise<void>)();
+  });
+});
+
+describe('fetcherPlugin single-flight generate()', () => {
+  let tmpDir: string;
+  const realFetch = globalThis.fetch;
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-serial-'));
+  });
+
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+    const start = Date.now();
+    while (!condition()) {
+      if (Date.now() - start > timeoutMs)
+        throw new Error('waitFor timed out');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  }
+
+  it('never runs two generate() calls concurrently and coalesces queued callers', async () => {
+    const remoteBody = readFileSync(SPEC_PATH, 'utf-8');
+    const resolvers: Array<(response: Response) => void> = [];
+    let fetchCalls = 0;
+    // The remote fetch is the controllable async gap inside generate():
+    // while it is pending, generate() is provably "in flight".
+    globalThis.fetch = (() => {
+      fetchCalls++;
+      return new Promise<Response>((resolve) => {
+        resolvers.push(resolve);
+      });
+    }) as unknown as typeof fetch;
+
+    const plugin = fetcherPlugin({
+      spec: SPEC_PATH,
+      url: 'https://example.com/openapi.json',
+      output: join(tmpDir, 'out'),
+    });
+    const buildStart = plugin.buildStart as () => Promise<void>;
+
+    // Three overlapping triggers while the first run is blocked on fetch.
+    const first = buildStart();
+    const second = buildStart();
+    const third = buildStart();
+    await waitFor(() => fetchCalls === 1);
+    // Nothing else may start while run #1 is in flight.
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(fetchCalls).toBe(1);
+
+    resolvers[0]!(new Response(remoteBody, { status: 200 }));
+    await first;
+
+    // The two queued callers coalesce into exactly ONE follow-up run.
+    await waitFor(() => fetchCalls === 2);
+    resolvers[1]!(new Response(remoteBody, { status: 200 }));
+    await Promise.all([second, third]);
+    expect(fetchCalls).toBe(2);
+  });
+
+  it('a queued run still executes after the in-flight run fails', async () => {
+    let fetchCalls = 0;
+    const resolvers: Array<{ resolve: (r: Response) => void; reject: (e: unknown) => void }> = [];
+    globalThis.fetch = (() => {
+      fetchCalls++;
+      return new Promise<Response>((resolve, reject) => {
+        resolvers.push({ resolve, reject });
+      });
+    }) as unknown as typeof fetch;
+
+    // No cache and no local file: a failed fetch makes generate() throw.
+    const plugin = fetcherPlugin({
+      spec: join(tmpDir, 'missing.json'),
+      url: 'https://example.com/openapi.json',
+      output: join(tmpDir, 'fail-out'),
+    });
+    const buildStart = plugin.buildStart as () => Promise<void>;
+
+    const first = buildStart();
+    const second = buildStart();
+    await waitFor(() => fetchCalls === 1);
+    resolvers[0]!.reject(new Error('boom'));
+    await expect(first).rejects.toThrow(/no cached or local file exists/);
+
+    // The queued follow-up still runs (and fails on its own terms).
+    await waitFor(() => fetchCalls === 2);
+    resolvers[1]!.reject(new Error('boom again'));
+    await expect(second).rejects.toThrow(/no cached or local file exists/);
+  });
+});
+
+describe('fetcherPlugin inlined module — unresolvable component refs', () => {
+  let tmpDir: string;
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'fetcher-plugin-unresolved-'));
+  });
+
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('emits a throwing getter naming the unresolvable ref, not a bogus "recursive" message', async () => {
+    const specPath = join(tmpDir, 'dangling.json');
+    writeFileSync(specPath, JSON.stringify({
+      openapi: '3.0.3',
+      info: { title: 't', version: '1' },
+      paths: {},
+      components: {
+        schemas: {
+          Broken: {
+            type: 'object',
+            properties: { x: { $ref: '#/components/schemas/Missing' } },
+          },
+          Fine: { type: 'object', properties: { y: { type: 'string' } } },
+        },
+      },
+    }));
+
+    // Note: buildStart is deliberately NOT called — openapi-typescript's
+    // bundled validator rejects dangling refs outright, but load() reads the
+    // spec directly and must still degrade gracefully per-component.
+    const plugin = fetcherPlugin({ spec: specPath, output: join(tmpDir, 'out') });
+    const code = (plugin.load as (id: string) => string | null)('\0virtual:fetcher/inlined')!;
+
+    // Fine inlines; Broken lands in the __failed map with the real reason.
+    // (JSON.parse emission → the key appears escaped inside the literal.)
+    expect(code).toContain(String.raw`\"Fine\"`);
+    expect(code).toContain('__failed');
+    expect(code).toContain('could not be inlined');
+    expect(code).toContain('Missing');
   });
 });

@@ -2,7 +2,7 @@
  * `withInputType` — re-tag a Standard Schema V1 schema's declared **input**
  * type without touching its runtime or output type.
  *
- * Standard Schema V1 has two generics: `Input` (invariant) and `Output`.
+ * Standard Schema V1 has two generics: `Input` (covariant) and `Output`.
  * Fetcher's validators (including the ones produced by `fromJSONSchema`,
  * the bundled builder, and most external libraries) declare their input
  * as `unknown`. That's fine for most consumers — but some integrators want
@@ -14,10 +14,19 @@
  * - Custom integrations that want to tell TypeScript "this schema is only
  *   valid input for a `ReadonlyRecord<string, string>` carrier" or similar.
  *
- * Because Standard Schema's `Input` is invariant, `StandardSchemaV1<unknown, T>`
- * is **not** assignable to `StandardSchemaV1<NarrowerInput, T>` without a
- * cast. `withInputType` is that cast, spelled once in the library so your
- * call sites stay clean.
+ * Standard Schema's `Input` is **covariant** — it only appears in the
+ * read-only position `types?: { readonly input: Input }` — so
+ * `StandardSchemaV1<I1, T>` is assignable to `StandardSchemaV1<I2, T>`
+ * exactly when `I1` is assignable to `I2`. That covariance is load-bearing
+ * for the whole library: it is why a Zod schema typed
+ * `StandardSchemaV1<{ email: string }, T>` drops into `Schema<T>`
+ * (`StandardSchemaV1<unknown, T>`) without a wrapper. The same covariance
+ * is why the *narrowing* direction needs a cast: `unknown` is the top
+ * type, so `StandardSchemaV1<unknown, T>` is **not** assignable to
+ * `StandardSchemaV1<NarrowerInput, T>` (`unknown` is not a subtype of
+ * `NarrowerInput`). `withInputType` is that cast, spelled once in the
+ * library so your call sites stay clean. Do not "fix" the variance —
+ * making `Input` invariant would break third-party schema acceptance.
  *
  * Zero runtime cost — the function returns the same object it was given,
  * only the compile-time type is re-tagged.

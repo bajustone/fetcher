@@ -8,6 +8,7 @@
 
 import type { StandardSchemaV1Issue, StandardSchemaV1PathSegment } from '../types.ts';
 
+/** Formatting options for {@link formatIssues}. */
 export interface FormatIssuesOptions {
   /** Inserted between issue lines. Default: `'\n'`. */
   readonly separator?: string;

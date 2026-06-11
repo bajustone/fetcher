@@ -6,8 +6,9 @@
  * @module
  */
 
-export { fromJSONSchema } from '../from-json-schema.ts';
-export { inline } from '../inline.ts';
+export { FETCHER_COERCE_MARKER, FETCHER_OPTIONAL_MARKER, fromJSONSchema } from '../from-json-schema.ts';
+export { inline, InlineCycleError, InlineUnresolvedRefError } from '../inline.ts';
+export type { InlineOptions } from '../inline.ts';
 export type { JSONSchemaDefinition } from '../json-schema-types.ts';
 export {
   bundleComponent,

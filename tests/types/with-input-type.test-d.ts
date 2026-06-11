@@ -63,3 +63,28 @@ export type _InputRetagged = Verify<
 export type _AssignsToNarrowerInput = Verify<
   typeof _formAware extends StandardSchemaV1<RemoteFormInput, Login> ? true : false
 >;
+
+// ---------------------------------------------------------------------------
+// Variance documentation locks. `Input` is COVARIANT (it appears only in a
+// read-only position), which has two load-bearing consequences:
+// ---------------------------------------------------------------------------
+
+// 1. Widening direction works WITHOUT a cast: a schema with a narrower
+//    declared Input (e.g. a Zod schema) assigns to Schema<T>
+//    (StandardSchemaV1<unknown, T>). This is why third-party validators
+//    drop into RouteDefinition slots.
+declare const _narrowInputSchema: StandardSchemaV1<{ email: string }, Login>;
+export type _CovariantWidening = Verify<
+  typeof _narrowInputSchema extends StandardSchemaV1<unknown, Login> ? true : false
+>;
+
+// 2. The narrowing direction does NOT work without a cast — `unknown` is
+//    the top type, so StandardSchemaV1<unknown, T> is not assignable to
+//    StandardSchemaV1<Narrower, T>. This (not invariance) is why
+//    withInputType exists.
+export type _NoNarrowingWithoutCast = Verify<
+  Equal<
+    typeof loginSchema extends StandardSchemaV1<RemoteFormInput, Login> ? true : false,
+    false
+  >
+>;

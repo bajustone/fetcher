@@ -50,8 +50,12 @@ interface paths {
         400: { content: { 'application/json': ApiError } };
       };
     };
-    // Non-supported verb — must not appear in PathsToRoutes<paths>['/pets']
+    // Real OPTIONS operation — supported verb since v1, must appear.
     options: { responses: { 200: Record<string, never> } };
+    // Phantom marker as openapi-typescript emits for unused verbs —
+    // must NOT appear (DefinedMethodKeys filters `?: never`).
+    head?: never;
+    trace?: never;
   };
   '/pets/{id}': {
     get: {
@@ -70,13 +74,14 @@ type Routes = PathsToRoutes<paths>;
 // Method-key uppercasing + unsupported-verb filtering
 // ---------------------------------------------------------------------------
 
-// Methods are uppercased from openapi-typescript's lowercase keys.
+// Methods are uppercased from openapi-typescript's lowercase keys; real
+// OPTIONS operations are first-class, `head?: never` phantoms are filtered.
 export type _MethodsOnPets = Verify<
-  Equal<keyof Routes['/pets'], 'GET' | 'POST'>
+  Equal<keyof Routes['/pets'], 'GET' | 'POST' | 'OPTIONS'>
 >;
-// `options` → filtered out entirely (not 'OPTIONS').
-export type _NoOptions = Verify<
-  'OPTIONS' extends keyof Routes['/pets'] ? false : true
+// `head?: never` / `trace?: never` phantom markers → filtered out.
+export type _NoPhantomHead = Verify<
+  'HEAD' extends keyof Routes['/pets'] ? false : true
 >;
 
 // ---------------------------------------------------------------------------
